@@ -1,11 +1,27 @@
 """Temporal worker entrypoint. See SPEC.md §6.2, §12.
 
-Fails fast at startup if `ANTHROPIC_API_KEY` / `MODAL_TOKEN_*` /
-`TEMPORAL_API_KEY` are missing — there is no point accepting work the
-process cannot possibly complete. Logs a warning (does not fail) if
-Temporal Cloud namespace-level fairness looks disabled, since fairness is a
-soft dependency (§6.1, §16.12): the system still works correctly without
-it, it just degrades to FIFO dispatch.
+Four independent worker *roles* run as separate processes, each polling its
+own task queue (`sbda.temporal.shared.TASK_QUEUE_*`):
+
+- `workflow`   — SubmissionWorkflow / FileAnalysisWorkflow workflow tasks only,
+                 no activities. GIL-bound (Python-SDK sandboxed replay runs on
+                 a thread pool), so its concurrency knobs are tuned separately
+                 from activity throughput.
+- `activities` — provision_sandbox, exec_tool, and the mark_* DB activities.
+- `llm`        — call_claude, so its concurrency can be tuned to the Anthropic
+                 rate limit independently of Modal capacity.
+- `terminate`  — terminate_sandbox only, on its own small dedicated pool, so a
+                 Modal capacity crunch that stalls provision_sandbox can never
+                 starve the one activity that would relieve it.
+
+Run with `python -m sbda.temporal.worker <role>`.
+
+Fails fast at startup if the credentials that role's activities need are
+missing — there is no point accepting work the process cannot possibly
+complete. Logs a warning (does not fail) if Temporal Cloud namespace-level
+fairness looks disabled, since fairness is a soft dependency (§6.1, §16.12):
+the system still works correctly without it, it just degrades to FIFO
+dispatch.
 """
 
 from __future__ import annotations
@@ -13,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -27,7 +44,12 @@ from sbda.temporal.activities.db import (
 )
 from sbda.temporal.activities.llm import call_claude
 from sbda.temporal.activities.sandbox import exec_tool, provision_sandbox, terminate_sandbox
-from sbda.temporal.shared import TASK_QUEUE
+from sbda.temporal.shared import (
+    TASK_QUEUE_ACTIVITIES,
+    TASK_QUEUE_LLM,
+    TASK_QUEUE_TERMINATE,
+    TASK_QUEUE_WORKFLOW,
+)
 from sbda.temporal.workflows.file_analysis import FileAnalysisWorkflow
 from sbda.temporal.workflows.submission import SubmissionWorkflow
 
@@ -39,22 +61,28 @@ FAIRNESS_DOC_URL = (
     "Temporal Cloud console, not a CLI flag or dynamic-config file)"
 )
 
+# Credentials each role's activities actually need, beyond TEMPORAL_API_KEY
+# (required for every role — the worker can't connect at all without it).
+_ROLE_REQUIRED_SETTINGS: dict[str, list[str]] = {
+    "workflow": [],
+    "activities": ["modal_token_id", "modal_token_secret"],
+    "llm": ["anthropic_api_key"],
+    "terminate": ["modal_token_id", "modal_token_secret"],
+}
 
-def _check_required_credentials() -> None:
+
+def _check_required_credentials(role: str) -> None:
     missing = []
-    if not settings.anthropic_api_key:
-        missing.append("ANTHROPIC_API_KEY")
-    if not settings.modal_token_id:
-        missing.append("MODAL_TOKEN_ID")
-    if not settings.modal_token_secret:
-        missing.append("MODAL_TOKEN_SECRET")
     if not settings.temporal_api_key:
         missing.append("TEMPORAL_API_KEY")
+    for field_name in _ROLE_REQUIRED_SETTINGS[role]:
+        if not getattr(settings, field_name):
+            missing.append(field_name.upper())
 
     if missing:
         names = ", ".join(missing)
         raise SystemExit(
-            f"sbda worker: missing required environment variable(s): {names}. "
+            f"sbda worker ({role}): missing required environment variable(s): {names}. "
             "Set them (see .env.example) before starting the worker."
         )
 
@@ -77,11 +105,22 @@ def _warn_about_fairness() -> None:
     )
 
 
-def build_worker(client: Client) -> Worker:
+def build_workflow_worker(client: Client) -> Worker:
     return Worker(
         client,
-        task_queue=TASK_QUEUE,
+        task_queue=TASK_QUEUE_WORKFLOW,
         workflows=[SubmissionWorkflow, FileAnalysisWorkflow],
+        max_concurrent_workflow_tasks=settings.worker_max_concurrent_workflow_tasks,
+        workflow_task_executor=ThreadPoolExecutor(
+            max_workers=settings.worker_workflow_task_executor_threads
+        ),
+    )
+
+
+def build_activities_worker(client: Client) -> Worker:
+    return Worker(
+        client,
+        task_queue=TASK_QUEUE_ACTIVITIES,
         activities=[
             mark_submission_running,
             mark_submission_terminal,
@@ -90,17 +129,40 @@ def build_worker(client: Client) -> Worker:
             mark_file_failed,
             provision_sandbox,
             exec_tool,
-            terminate_sandbox,
-            call_claude,
         ],
         max_concurrent_activities=settings.worker_max_concurrent_activities,
-        max_concurrent_workflow_tasks=settings.worker_max_concurrent_workflow_tasks,
     )
 
 
-async def main() -> None:
+def build_llm_worker(client: Client) -> Worker:
+    return Worker(
+        client,
+        task_queue=TASK_QUEUE_LLM,
+        activities=[call_claude],
+        max_concurrent_activities=settings.worker_max_concurrent_llm_activities,
+    )
+
+
+def build_terminate_worker(client: Client) -> Worker:
+    return Worker(
+        client,
+        task_queue=TASK_QUEUE_TERMINATE,
+        activities=[terminate_sandbox],
+        max_concurrent_activities=settings.worker_max_concurrent_terminate_activities,
+    )
+
+
+ROLE_BUILDERS = {
+    "workflow": build_workflow_worker,
+    "activities": build_activities_worker,
+    "llm": build_llm_worker,
+    "terminate": build_terminate_worker,
+}
+
+
+async def main(role: str) -> None:
     logging.basicConfig(level=logging.INFO)
-    _check_required_credentials()
+    _check_required_credentials(role)
 
     client = await Client.connect(
         settings.temporal_address,
@@ -110,18 +172,19 @@ async def main() -> None:
     )
     _warn_about_fairness()
 
-    worker = build_worker(client)
-    logger.info(
-        "sbda worker starting on task queue %r (max_concurrent_activities=%d)",
-        TASK_QUEUE,
-        settings.worker_max_concurrent_activities,
-    )
+    worker = ROLE_BUILDERS[role](client)
+    logger.info("sbda worker (%s) starting on task queue %r", role, worker.task_queue)
     await worker.run()
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        if len(sys.argv) != 2 or sys.argv[1] not in ROLE_BUILDERS:
+            valid = ", ".join(sorted(ROLE_BUILDERS))
+            raise SystemExit(
+                f"usage: python -m sbda.temporal.worker <role>, where <role> is one of: {valid}"
+            )
+        asyncio.run(main(sys.argv[1]))
     except SystemExit as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)

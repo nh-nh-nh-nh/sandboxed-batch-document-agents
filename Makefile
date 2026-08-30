@@ -1,4 +1,4 @@
-.PHONY: up down migrate seed api worker web test test-unit test-api test-activities test-workflows test-web
+.PHONY: up down migrate seed api worker-workflow worker-activities worker-llm worker-terminate web test test-unit test-api test-activities test-workflows test-web
 
 up:
 	docker compose up -d
@@ -15,8 +15,17 @@ seed:
 api:
 	cd backend && uv run uvicorn sbda.api.main:app --reload --port 8000
 
-worker:
-	cd backend && uv run python -m sbda.temporal.worker
+worker-workflow:
+	cd backend && uv run python -m sbda.temporal.worker workflow
+
+worker-activities:
+	cd backend && uv run python -m sbda.temporal.worker activities
+
+worker-llm:
+	cd backend && uv run python -m sbda.temporal.worker llm
+
+worker-terminate:
+	cd backend && uv run python -m sbda.temporal.worker terminate
 
 web:
 	cd frontend && VITE_API_BASE_URL=http://localhost:8000 npm run dev

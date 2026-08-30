@@ -41,9 +41,11 @@ class Settings(BaseSettings):
     temporal_namespace: str = "sandboxed-batch-document-agents.ast5h"
     temporal_api_key: str = ""
     temporal_tls: bool = True
-    temporal_task_queue: str = "document-analysis"
-    worker_max_concurrent_activities: int = 16
-    worker_max_concurrent_workflow_tasks: int = 100
+    worker_max_concurrent_activities: int = 10
+    worker_max_concurrent_llm_activities: int = 16
+    worker_max_concurrent_terminate_activities: int = 4
+    worker_max_concurrent_workflow_tasks: int = 5
+    worker_workflow_task_executor_threads: int = 5
 
     # --- Anthropic ---
     anthropic_api_key: str = ""

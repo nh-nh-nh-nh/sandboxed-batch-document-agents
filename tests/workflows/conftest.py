@@ -10,12 +10,14 @@ Modal, or Anthropic.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from dataclasses import dataclass, field
 
 import pytest_asyncio
 from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
 
 from sbda.temporal.activities.db import (
     MarkFileFailedInput,
@@ -31,6 +33,27 @@ from sbda.temporal.activities.sandbox import (
     ProvisionInput,
     ProvisionResult,
     TerminateInput,
+)
+from sbda.temporal.shared import (
+    TASK_QUEUE_ACTIVITIES,
+    TASK_QUEUE_LLM,
+    TASK_QUEUE_TERMINATE,
+    TASK_QUEUE_WORKFLOW,
+)
+from sbda.temporal.workflows.file_analysis import FileAnalysisWorkflow
+from sbda.temporal.workflows.submission import SubmissionWorkflow
+
+# Activities routed to the "activities" queue in real workflow code
+# (sbda/temporal/workflows/{submission,file_analysis}.py) — kept in sync by
+# hand since there's no single source of truth to derive it from in tests.
+_ACTIVITIES_QUEUE_NAMES = (
+    "mark_submission_running",
+    "mark_submission_terminal",
+    "mark_file_running",
+    "mark_file_succeeded",
+    "mark_file_failed",
+    "provision_sandbox",
+    "exec_tool",
 )
 
 
@@ -218,6 +241,52 @@ def build_fake_activities(recorder: Recorder, scripts: dict[str, Script]):
         terminate_sandbox,
         call_claude,
     ]
+
+
+@contextlib.asynccontextmanager
+async def run_all_workers(client, recorder, scripts, *, llm_activities=None, skip_llm=False):
+    """Starts one `Worker` per real task queue (workflow/activities/llm/
+    terminate) — mirroring production's four-queue split (SPEC.md §6) — all
+    backed by the same `Recorder`/`Script`-driven fakes from
+    `build_fake_activities`. Individual workflow tests use this in place of a
+    single combined `Worker`, since with activities routed to their own
+    queues, one worker on the workflow queue alone would never see them.
+
+    `llm_activities` overrides what's registered on the llm queue (e.g. to
+    replace `call_claude` with one that raises, for error-path tests).
+    `skip_llm` omits the llm worker entirely, e.g. to test schedule-to-start
+    timeout behavior for an activity nothing ever picks up.
+    """
+    activities = {a.__name__: a for a in build_fake_activities(recorder, scripts)}
+    async with contextlib.AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=TASK_QUEUE_WORKFLOW,
+                workflows=[SubmissionWorkflow, FileAnalysisWorkflow],
+            )
+        )
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=TASK_QUEUE_ACTIVITIES,
+                activities=[activities[name] for name in _ACTIVITIES_QUEUE_NAMES],
+            )
+        )
+        if not skip_llm:
+            if llm_activities is None:
+                llm_activities = [activities["call_claude"]]
+            await stack.enter_async_context(
+                Worker(client, task_queue=TASK_QUEUE_LLM, activities=llm_activities)
+            )
+        await stack.enter_async_context(
+            Worker(
+                client,
+                task_queue=TASK_QUEUE_TERMINATE,
+                activities=[activities["terminate_sandbox"]],
+            )
+        )
+        yield
 
 
 def _infer_file_key(messages: list[dict]) -> str:

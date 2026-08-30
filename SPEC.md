@@ -320,9 +320,26 @@ cross-tenant read path is explicitly tested.
 
 ## 6. Temporal Topology
 
-### 6.1 Task queue and fairness
+### 6.1 Task queues and fairness
 
-**One task queue:** `document-analysis`.
+**Four task queues, one dedicated worker process each** (`make worker-*`),
+so Modal capacity, the Anthropic rate limit, and GIL-bound workflow-task
+replay can each be tuned independently, and so `terminate_sandbox` always has
+worker capacity even when `provision_sandbox` is saturated by a Modal outage:
+
+| queue | worker role | handles |
+|---|---|---|
+| `document-analysis-workflow` | `workflow` | `SubmissionWorkflow`, `FileAnalysisWorkflow` — workflow tasks only, no activities |
+| `document-analysis-activities` | `activities` | `mark_*` (5 DB activities), `provision_sandbox`, `exec_tool` |
+| `document-analysis-llm` | `llm` | `call_claude` |
+| `document-analysis-terminate` | `terminate` | `terminate_sandbox`, on its own small dedicated worker pool — this is what stops a Modal capacity crunch (which stalls `provision_sandbox`) from also starving the one activity that would relieve it |
+
+Every `workflow.execute_activity` call in workflow code passes an explicit
+`task_queue=` naming the activity's queue — the workflow's own task queue
+(`document-analysis-workflow`) has no activity workers polling it, so this is
+required, not optional. `execute_child_workflow` for `FileAnalysisWorkflow`
+is left at its default (inherits the parent's queue), since the workflow
+worker handles both workflow types.
 
 Fairness key is the **tenant id**, weight `1.0` (equal share), set on:
 
@@ -339,7 +356,8 @@ priority = Priority(fairness_key=str(tenant_id), fairness_weight=1.0)
 Consequence: when Company A has 100 files backlogged and Company B submits 1,
 B's file is dispatched against A's backlog at roughly equal share rather than
 queueing behind all 100. When B is idle, A gets 100% of worker capacity — no
-artificial per-tenant cap.
+artificial per-tenant cap. This applies independently on each of the four
+queues.
 
 **Temporal Cloud requirement (verified):** fairness dispatch is a per-namespace
 toggle under **Settings → Fairness** in the Temporal Cloud console (not a CLI
@@ -347,24 +365,25 @@ flag or dynamic-config file — those only apply to a self-hosted server), and
 carries a 10% surcharge on every Action in the namespace once enabled. It has
 been turned on for `sandboxed-batch-document-agents.ast5h`. If fairness is
 disabled the system still works correctly — dispatch simply becomes FIFO — so
-this is a soft dependency, and the worker logs a startup warning naming the
+this is a soft dependency, and every worker logs a startup warning naming the
 flag.
 
 ### 6.2 Concurrency
 
 Child workflows fan out **unbounded** — all N files are started immediately.
-The real limiter is worker capacity, which is where fairness dispatch operates:
+The real limiter is worker capacity, which is where fairness dispatch
+operates — now tuned per queue instead of by one shared knob:
 
-| setting | default | why |
-|---|---|---|
-| `max_concurrent_workflow_tasks` | 100 | cheap, workflow tasks are short |
-| `max_concurrent_activities` | 16 | bounds concurrent sandboxes *and* concurrent Anthropic calls |
-| `max_concurrent_local_activities` | 16 | |
+| queue | setting | default | why |
+|---|---|---|---|
+| `document-analysis-workflow` | `max_concurrent_workflow_tasks` | 5 | GIL-bound: Python-SDK sandboxed workflow replay runs on a thread pool (`workflow_task_executor`), and 5 threads was the observed sweet spot before contention outweighs concurrency |
+| `document-analysis-activities` | `max_concurrent_activities` | 10 | bounds `provision_sandbox`/`exec_tool` against Modal quota |
+| `document-analysis-llm` | `max_concurrent_activities` | 16 | bounds `call_claude` against the Anthropic rate limit, independently of Modal |
+| `document-analysis-terminate` | `max_concurrent_activities` | 4 | small dedicated pool — cheap operation, just needs to never be starved by the other queues |
 
-`max_concurrent_activities` is the single knob that protects both the Modal
-quota and the Anthropic rate limit. Lowering it makes the fairness behaviour
-more visible (more `PENDING` files at once); raising it increases throughput.
-Env: `WORKER_MAX_CONCURRENT_ACTIVITIES`.
+Envs: `WORKER_MAX_CONCURRENT_WORKFLOW_TASKS`, `WORKER_WORKFLOW_TASK_EXECUTOR_THREADS`,
+`WORKER_MAX_CONCURRENT_ACTIVITIES`, `WORKER_MAX_CONCURRENT_LLM_ACTIVITIES`,
+`WORKER_MAX_CONCURRENT_TERMINATE_ACTIVITIES`.
 
 ### 6.3 Timeouts
 
@@ -1006,9 +1025,13 @@ TEMPORAL_ADDRESS=sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233
 TEMPORAL_NAMESPACE=sandboxed-batch-document-agents.ast5h
 TEMPORAL_API_KEY=
 TEMPORAL_TLS=true
-TEMPORAL_TASK_QUEUE=document-analysis
-WORKER_MAX_CONCURRENT_ACTIVITIES=16
-WORKER_MAX_CONCURRENT_WORKFLOW_TASKS=100
+# Four task queues (document-analysis-workflow/-activities/-llm/-terminate),
+# each served by its own `make worker-*` process — see §6.1/§6.2.
+WORKER_MAX_CONCURRENT_ACTIVITIES=10
+WORKER_MAX_CONCURRENT_LLM_ACTIVITIES=16
+WORKER_MAX_CONCURRENT_TERMINATE_ACTIVITIES=4
+WORKER_MAX_CONCURRENT_WORKFLOW_TASKS=5
+WORKER_WORKFLOW_TASK_EXECUTOR_THREADS=5
 
 # --- Anthropic (real credentials required) ---
 ANTHROPIC_API_KEY=
@@ -1069,8 +1092,10 @@ generated from the namespace's **Authentication** panel in the Temporal Cloud
 console and shown only once.
 
 Modal, Anthropic, and Temporal Cloud are **not** containerized — they need
-real accounts. The worker fails fast at startup with a clear message if any
-credential is missing.
+real accounts. Each of the four `make worker-*` processes (§6.1) fails fast
+at startup with a clear message if a credential its role needs is missing —
+`TEMPORAL_API_KEY` for all four, plus `MODAL_TOKEN_*` for `activities`/
+`terminate` and `ANTHROPIC_API_KEY` for `llm`.
 
 ---
 
@@ -1082,7 +1107,10 @@ make up                     # docker compose up -d (postgres + minio only)
 make migrate                # alembic upgrade head
 make seed                   # insert Company A + Company B
 make api                    # uvicorn, :8000
-make worker                 # temporal worker
+make worker-workflow        # temporal worker: workflow tasks
+make worker-activities      # temporal worker: provision_sandbox/exec_tool/mark_* DB
+make worker-llm             # temporal worker: call_claude
+make worker-terminate       # temporal worker: terminate_sandbox
 make web                    # vite dev server, :5173
 
 make test                   # all backend layers
@@ -1528,19 +1556,23 @@ that when one bites, the cause is already documented.
    `size_bytes` at provision time.
 
 6. **`cpu=0.25` slows wall-clock under contention.** With
-   `WORKER_MAX_CONCURRENT_ACTIVITIES=16`, sixteen quarter-core sandboxes are
-   live at once; a CPU-bound pandas profile takes correspondingly longer, which
-   pushes against the 3-minute `exec_tool` timeout and the 20-minute sandbox
-   wall clock on large files. The tradeoff is deliberate — small sandboxes make
-   the fan-out cheap — but a `TIMEOUT` category appearing on large files is the
-   signal to raise `SANDBOX_CPU`.
+   `WORKER_MAX_CONCURRENT_ACTIVITIES=10` on the `document-analysis-activities`
+   queue, ten quarter-core sandboxes are live at once; a CPU-bound pandas
+   profile takes correspondingly longer, which pushes against the 3-minute
+   `exec_tool` timeout and the 20-minute sandbox wall clock on large files.
+   The tradeoff is deliberate — small sandboxes make the fan-out cheap — but a
+   `TIMEOUT` category appearing on large files is the signal to raise
+   `SANDBOX_CPU`.
 
 7. **Unbounded fan-out meets a fixed activity budget.** 100 children start
-   instantly but only `WORKER_MAX_CONCURRENT_ACTIVITIES` make progress. This is
-   intended — it is what makes fairness observable — but it means wall-clock for
-   a 100-file batch is roughly `100 / concurrency × per-file duration`, and the
-   Anthropic rate limit is governed by that same single knob rather than by a
-   token-aware limiter.
+   instantly but only `WORKER_MAX_CONCURRENT_ACTIVITIES` (activities queue)
+   make provisioning/exec progress at once. This is intended — it is what
+   makes fairness observable — but it means wall-clock for a 100-file batch is
+   roughly `100 / concurrency × per-file duration`. Since §6.1/§6.2's split,
+   the Anthropic rate limit is governed by its own independent knob,
+   `WORKER_MAX_CONCURRENT_LLM_ACTIVITIES` on the `document-analysis-llm`
+   queue, rather than a token-aware limiter — but at least no longer by the
+   same knob that also bounds Modal concurrency.
 
 8. **No cancel.** A submission started in error runs to completion. The only
    levers are the timeouts and terminating the workflow from the Temporal UI.

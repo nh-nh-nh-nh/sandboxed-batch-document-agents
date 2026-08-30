@@ -13,7 +13,10 @@ from temporalio.common import Priority, RetryPolicy
 from sbda.core.errors import LLMClientError, ValidationError
 from sbda.temporal.activities.llm import MAX_OTHER_RETRYABLE_ATTEMPTS, MAX_RATE_LIMIT_ATTEMPTS
 
-TASK_QUEUE = "document-analysis"
+TASK_QUEUE_WORKFLOW = "document-analysis-workflow"
+TASK_QUEUE_ACTIVITIES = "document-analysis-activities"
+TASK_QUEUE_LLM = "document-analysis-llm"
+TASK_QUEUE_TERMINATE = "document-analysis-terminate"
 
 
 # --- Workflow input/output shapes (plain dataclasses — Temporal-serializable) ---
