@@ -57,3 +57,15 @@ def test_validation_and_llm_client_error_are_non_retryable_in_shared_policy():
     )
     assert "ValidationError" in shared.CHILD_RETRY.non_retryable_error_types
     assert "LLMClientError" in shared.CALL_CLAUDE_RETRY.non_retryable_error_types
+
+
+def test_sandbox_gone_is_non_retryable_in_exec_tool_policy():
+    # exec_tool only raises SandboxGoneError once it has positively identified
+    # the sandbox as gone (_looks_like_sandbox_gone) — retrying it via
+    # Temporal's transport-level policy would just re-fail against the same
+    # dead sandbox for ~90s before the workflow's mid-loop recovery ever runs.
+    shared = pytest.importorskip(
+        "sbda.temporal.shared",
+        reason="temporal/shared.py is implemented in the Temporal-workflow slice",
+    )
+    assert "SandboxGoneError" in shared.EXEC_TOOL_RETRY.non_retryable_error_types
