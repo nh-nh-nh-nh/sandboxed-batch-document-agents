@@ -27,7 +27,7 @@ import json
 import textwrap
 from dataclasses import dataclass
 
-from sbda.core.truncate import truncate
+from sbda.core.truncate import truncate_output as truncate
 
 CELL_DIR = "/work/.agent"
 

@@ -87,8 +87,8 @@ class SubmissionWorkflow:
             MarkSubmissionTerminalInput(
                 submission_id=input.submission_id,
                 status=result.status.value,
-                succeeded_count=result.succeeded,
-                failed_count=result.failed,
+                succeeded_count=result.succeeded_count,
+                failed_count=result.failed_count,
             ),
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=MARK_DB_RETRY_POLICY,
@@ -96,5 +96,7 @@ class SubmissionWorkflow:
         )
 
         return SubmissionResult(
-            status=result.status.value, succeeded=result.succeeded, failed=result.failed
+            status=result.status.value,
+            succeeded=result.succeeded_count,
+            failed=result.failed_count,
         )

@@ -113,6 +113,10 @@ MARK_DB_RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(seconds=30),
 )
 
+# Short aliases used by tests/unit/test_errors.py (SPEC.md §14.1).
+CHILD_RETRY = CHILD_WORKFLOW_RETRY_POLICY
+CALL_CLAUDE_RETRY = CALL_CLAUDE_RETRY_POLICY
+
 
 def fairness_priority(tenant_id: str) -> Priority:
     """§6.1 — fairness key is the tenant id, equal weight."""

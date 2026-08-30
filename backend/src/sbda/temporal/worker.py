@@ -92,7 +92,6 @@ def build_worker(client: Client) -> Worker:
         ],
         max_concurrent_activities=settings.worker_max_concurrent_activities,
         max_concurrent_workflow_tasks=settings.worker_max_concurrent_workflow_tasks,
-        max_concurrent_local_activities=settings.worker_max_concurrent_local_activities,
     )
 
 
