@@ -95,6 +95,55 @@ async def _submission_detail_payload(db: AsyncSession, submission: Submission) -
     return payload
 
 
+async def _ensure_workflow_started(
+    temporal: TemporalClientInterface,
+    db: AsyncSession,
+    submission: Submission,
+    file_rows: list[dict],
+) -> None:
+    """Start `submission-{submission.id}`, tolerating the case where it's
+    already running (deterministic id + REJECT_DUPLICATE reuse policy makes
+    this safe to retry any number of times — see temporal/client.py).
+
+    `submission.run_id` is only ever set once a start attempt is confirmed
+    (either we started it, or Temporal told us it already exists). While
+    `run_id` is null, the caller in `create_submission`'s idempotency-key
+    path will keep retrying the start on every replay, so a submission can
+    never get stuck PENDING with no workflow behind it.
+    """
+    refs = [
+        FileRef(
+            file_id=row["id"],
+            s3_key=row["s3_key"],
+            original_filename=row["original_filename"],
+            size_bytes=row["size_bytes"],
+        )
+        for row in file_rows
+    ]
+    try:
+        run_id = await temporal.start_submission_workflow(
+            submission_id=submission.id, tenant_id=submission.tenant_id, files=refs
+        )
+    except WorkflowAlreadyStartedError:
+        run_id = None
+    except Exception as e:
+        submission.error_message = f"Failed to start workflow: {e}"
+        await db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "WORKFLOW_START_FAILED",
+                "message": "Could not start processing. Retry this request with the same "
+                "Idempotency-Key header.",
+            },
+        ) from e
+
+    if run_id is not None:
+        submission.run_id = run_id
+    submission.error_message = None
+    await db.commit()
+
+
 @router.post("/submissions", status_code=202)
 async def create_submission(
     tenant_id: uuid.UUID,
@@ -117,6 +166,27 @@ async def create_submission(
         )
         existing = result.scalar_one_or_none()
         if existing is not None:
+            if existing.run_id is None:
+                # A prior attempt committed the submission/file rows but never
+                # confirmed the workflow started (e.g. Temporal was
+                # unreachable). Retry the start now rather than returning a
+                # submission stuck PENDING forever.
+                files_result = await db.execute(
+                    select(FileRow)
+                    .where(FileRow.submission_id == existing.id)
+                    .order_by(FileRow.created_at)
+                )
+                existing_file_rows = [
+                    {
+                        "id": f.id,
+                        "s3_key": f.s3_key,
+                        "original_filename": f.original_filename,
+                        "size_bytes": f.size_bytes,
+                    }
+                    for f in files_result.scalars().all()
+                ]
+                await _ensure_workflow_started(temporal, db, existing, existing_file_rows)
+                await db.refresh(existing)
             response.status_code = 200
             return await _submission_detail_payload(db, existing)
 
@@ -222,23 +292,10 @@ async def create_submission(
         raise
 
     # 5. Start the workflow. A deterministic id means WorkflowAlreadyStartedError
-    #    is success, not failure.
-    refs = [
-        FileRef(
-            file_id=row["id"],
-            s3_key=row["s3_key"],
-            original_filename=row["original_filename"],
-            size_bytes=row["size_bytes"],
-        )
-        for row in file_rows
-    ]
-    try:
-        await temporal.start_submission_workflow(
-            submission_id=submission_id, tenant_id=tenant.id, files=refs
-        )
-    except WorkflowAlreadyStartedError:
-        pass
-
+    #    is success, not failure. On any other failure, _ensure_workflow_started
+    #    leaves submission.run_id null and raises 502 — a retry with the same
+    #    Idempotency-Key header (step 1) will keep attempting the start.
+    await _ensure_workflow_started(temporal, db, submission, file_rows)
     await db.refresh(submission)
     response.status_code = 202
     return await _submission_detail_payload(db, submission)

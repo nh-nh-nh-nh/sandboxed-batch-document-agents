@@ -81,11 +81,15 @@ class TemporalClientInterface(Protocol):
         submission_id: uuid.UUID,
         tenant_id: uuid.UUID,
         files: list[FileRef],
-    ) -> None:
+    ) -> str | None:
         """Start `submission-{submission_id}` (SubmissionWorkflow.run) with a
         deterministic workflow id, per SPEC.md §7.1. Must raise
         `WorkflowAlreadyStartedError` (not the raw Temporal exception) when
-        that id is already running."""
+        that id already exists — including a *completed* execution, so the
+        id reuse policy used here must reject duplicates outright rather
+        than only rejecting currently-running ones (see temporal/client.py).
+        On success, returns the new run's id so the caller can record it as
+        confirmation that the workflow was actually started."""
         ...
 
 
@@ -100,13 +104,14 @@ class StubTemporalClient:
         submission_id: uuid.UUID,
         tenant_id: uuid.UUID,
         files: list[FileRef],
-    ) -> None:
+    ) -> str | None:
         logger.info(
             "StubTemporalClient: would start submission-%s for tenant %s with %d file(s)",
             submission_id,
             tenant_id,
             len(files),
         )
+        return "stub-run-id"
 
 
 _temporal_client: TemporalClientInterface = StubTemporalClient()

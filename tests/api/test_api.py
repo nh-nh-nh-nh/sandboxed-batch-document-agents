@@ -136,6 +136,48 @@ async def test_workflow_already_started_error_is_swallowed(app_client, tenant):
     assert resp.status_code == 202
 
 
+async def test_workflow_start_failure_leaves_submission_retryable(app_client, tenant):
+    """A submission whose workflow failed to start must not get stuck PENDING
+    forever: it returns 502, and retrying with the same Idempotency-Key
+    re-attempts the start instead of silently returning the broken row."""
+    client, ctx = app_client
+    key = str(uuid.uuid4())
+    ctx["temporal"].raise_error = RuntimeError("temporal unreachable")
+
+    resp1 = await client.post(
+        f"/api/tenants/{tenant.id}/submissions",
+        files=[_csv("a.csv")],
+        headers={"Idempotency-Key": key},
+    )
+    assert resp1.status_code == 502
+    assert resp1.json()["detail"]["error"] == "WORKFLOW_START_FAILED"
+    assert len(ctx["temporal"].calls) == 1
+
+    # The submission and its files were still committed — no upload is
+    # redone on retry.
+    objs = ctx["s3"].list_objects_v2(Bucket=ctx["settings"].s3_bucket)
+    assert objs.get("KeyCount", 0) == 1
+
+    ctx["temporal"].raise_error = None
+    resp2 = await client.post(
+        f"/api/tenants/{tenant.id}/submissions",
+        files=[_csv("a.csv")],
+        headers={"Idempotency-Key": key},
+    )
+    assert resp2.status_code == 200
+    assert resp2.json()["status"] == "PENDING"
+    assert len(ctx["temporal"].calls) == 2  # the repair path retried the start
+
+    # A third replay no longer needs to retry — run_id is confirmed.
+    resp3 = await client.post(
+        f"/api/tenants/{tenant.id}/submissions",
+        files=[_csv("a.csv")],
+        headers={"Idempotency-Key": key},
+    )
+    assert resp3.status_code == 200
+    assert len(ctx["temporal"].calls) == 2
+
+
 async def test_cross_tenant_submission_read_is_404(app_client, tenant, other_tenant):
     client, _ = app_client
     resp = await client.post(f"/api/tenants/{tenant.id}/submissions", files=[_csv("a.csv")])
