@@ -396,7 +396,8 @@ There is no user-facing cancel. Every layer is bounded by an explicit timeout.
 | `FileAnalysisWorkflow` | single-attempt run timeout | 15 m |
 | `call_claude` activity | start-to-close | 5 m |
 | `call_claude` activity | schedule-to-start | 30 m |
-| `provision_sandbox` activity | start-to-close | 5 m |
+| `provision_sandbox` activity | start-to-close | 30 s |
+| `provision_sandbox` activity | schedule-to-start | 30 s |
 | `exec_tool` activity | start-to-close | 3 m |
 | `terminate_sandbox` activity | start-to-close | 1 m |
 | Modal sandbox | `timeout=` | 20 m wall clock |
@@ -412,7 +413,7 @@ worker dies permanently, no sandbox outlives 20 minutes.
 | `FileAnalysisWorkflow` (child) | `maximum_attempts=3`, `initial_interval=5s`, `backoff=2.0`; `non_retryable_error_types=["ValidationError"]` |
 | `call_claude` | `maximum_attempts=5`, `initial_interval=2s`, `backoff=2.0`, `maximum_interval=60s`; `non_retryable_error_types=["LLMClientError"]` |
 | `provision_sandbox` | `maximum_attempts=3` |
-| `exec_tool` | `maximum_attempts=2` (transport-level only; tool *failure* is a normal result, not an exception) |
+| `exec_tool` | `maximum_attempts=10`, `initial_interval=10s`, `backoff=1.0` (transport-level only; tool *failure* is a normal result, not an exception) |
 | `recover_sandbox` | `maximum_attempts=3` |
 | `terminate_sandbox` | `maximum_attempts=5`, long backoff — must not leak |
 | `mark_*` DB activities | unlimited attempts, `maximum_interval=30s` — the read model must converge |
