@@ -102,6 +102,7 @@ def test_build_activities_worker(fake_worker):
         "mark_file_failed",
         "provision_sandbox",
         "exec_tool",
+        "recover_sandbox",
     }
     assert fake_worker["max_concurrent_activities"] == settings.worker_max_concurrent_activities
 
