@@ -69,7 +69,8 @@ FILE_WORKFLOW_SINGLE_ATTEMPT_RUN_TIMEOUT = timedelta(minutes=15)
 CALL_CLAUDE_START_TO_CLOSE_TIMEOUT = timedelta(minutes=5)
 CALL_CLAUDE_SCHEDULE_TO_START_TIMEOUT = timedelta(minutes=30)
 
-PROVISION_SANDBOX_START_TO_CLOSE_TIMEOUT = timedelta(minutes=5)
+PROVISION_SANDBOX_START_TO_CLOSE_TIMEOUT = timedelta(seconds=30)
+PROVISION_SANDBOX_SCHEDULE_TO_START_TIMEOUT = timedelta(seconds=30)
 EXEC_TOOL_START_TO_CLOSE_TIMEOUT = timedelta(minutes=3)
 TERMINATE_SANDBOX_START_TO_CLOSE_TIMEOUT = timedelta(minutes=1)
 
@@ -110,7 +111,12 @@ RECOVER_SANDBOX_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 
 # Transport-level retries only — a non-zero exit from the tool code itself is a
 # normal (non-exceptional) activity result, not a failure Temporal retries.
-EXEC_TOOL_RETRY_POLICY = RetryPolicy(maximum_attempts=2)
+EXEC_TOOL_RETRY_POLICY = RetryPolicy(
+    maximum_attempts=10,
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=1.0,
+    maximum_interval=timedelta(seconds=10),
+)
 
 # Must not leak a sandbox: retried aggressively, for a long time.
 TERMINATE_SANDBOX_RETRY_POLICY = RetryPolicy(

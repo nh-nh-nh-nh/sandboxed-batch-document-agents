@@ -200,7 +200,7 @@ def build_fake_activities(recorder: Recorder, scripts: dict[str, Script]):
         # A "gone" sandbox stays gone: fail deterministically for *every* call
         # against this sandbox generation, not just the Nth call overall.
         # Keying on a raw call counter instead would let Temporal's own
-        # transport-level retry (EXEC_TOOL_RETRY_POLICY, maximum_attempts=2 —
+        # transport-level retry (EXEC_TOOL_RETRY_POLICY, maximum_attempts=10 —
         # which reuses the same sandbox_id) silently "recover" for free the
         # moment the counter ticks past the failing number, without the
         # workflow's own recovery loop ever running.
