@@ -1,30 +1,40 @@
-# STUB — owned by the backend-foundation slice (see SPEC.md §3.4, §7.1, §14.1 `test_rollup.py`).
-#
-# Pure fan-in decision function used by SubmissionWorkflow. Reconcile against
-# the backend-foundation PR's real `core/rollup.py`.
+"""Fan-in rollup: child file statuses -> submission status (SPEC.md §3.4, §7.1).
+
+Pure function: no I/O, no Temporal, no db access.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sbda.db.models import FileStatus, SubmissionStatus
+from sbda.core.enums import FileStatus, SubmissionStatus
+
+
+class EmptyRollupError(Exception):
+    """An empty submission is unreachable and must not silently succeed."""
+
+    def __init__(self) -> None:
+        super().__init__("Cannot roll up an empty list of file statuses")
 
 
 @dataclass(frozen=True)
 class RollupResult:
     status: SubmissionStatus
-    succeeded: int
-    failed: int
+    succeeded_count: int
+    failed_count: int
 
 
 def rollup(statuses: list) -> RollupResult:
-    """Compute submission status from child statuses/exceptions.
+    """Compute the submission-level terminal status from child results.
 
-    Each element of `statuses` is either a `FileStatus` (or the string
-    "SUCCEEDED"/"FAILED") or an exception instance (counted as failed).
+    Each element of ``statuses`` is either a ``FileStatus`` (or the string
+    value of one) or an exception instance — an exception is treated exactly
+    like a ``FAILED`` result, mirroring ``asyncio.gather(return_exceptions=True)``
+    in the parent workflow (§7.1).
     """
-    if not statuses:
-        raise ValueError("rollup() called with an empty statuses list")
+
+    if len(statuses) == 0:
+        raise EmptyRollupError()
 
     succeeded = 0
     failed = 0
@@ -38,8 +48,7 @@ def rollup(statuses: list) -> RollupResult:
         else:
             failed += 1
 
-    total = succeeded + failed
-    assert total == len(statuses)
+    assert succeeded + failed == len(statuses)
 
     if failed == 0:
         status = SubmissionStatus.SUCCEEDED
@@ -48,4 +57,4 @@ def rollup(statuses: list) -> RollupResult:
     else:
         status = SubmissionStatus.PARTIALLY_SUCCEEDED
 
-    return RollupResult(status=status, succeeded=succeeded, failed=failed)
+    return RollupResult(status=status, succeeded_count=succeeded, failed_count=failed)

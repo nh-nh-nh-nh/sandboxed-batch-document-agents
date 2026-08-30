@@ -1,49 +1,96 @@
-# STUB — owned by the backend-foundation slice (see SPEC.md §14.1 `test_errors.py`, §2).
-#
-# Minimal implementation of the exception hierarchy and the
-# exception -> (error_category, retryable) classifier described in SPEC.md.
-# The temporal/agent slice imports `from sbda.core.errors import classify,
-# ValidationError, LLMClientError, SandboxGoneError` and depends on the exact
-# names/behavior below. Reconcile against the backend-foundation PR's real
-# `core/errors.py`.
+"""Exception -> (error_category, retryable) classifier (SPEC.md §14.1).
+
+Pure logic: no imports from Temporal, Modal, boto3, or the Anthropic SDK.
+The activity layer (implemented in another slice) is responsible for
+catching the real SDK exceptions (``modal.exception.NotFoundError``,
+``anthropic.RateLimitError``, etc.) and re-raising them as one of the
+exception types defined here, so that this classifier — and the workflow
+control flow that depends on it — never needs to know about those SDKs.
+"""
 
 from __future__ import annotations
 
-from sbda.db.models import ErrorCategory
+from typing import NamedTuple
+
+from sbda.core.enums import ErrorCategory
+from sbda.core.validation import ValidationError
+
+__all__ = [
+    "ErrorClassification",
+    "LLMClientError",
+    "LLMConnectionError",
+    "LLMRateLimitError",
+    "LLMServerError",
+    "SandboxError",
+    "SandboxGoneError",
+    "SandboxProvisionError",
+    "ToolExecutionError",
+    "ValidationError",
+    "classify",
+]
 
 
-class ValidationError(Exception):
-    """Non-retryable: the input itself is invalid (bad file, malformed batch)."""
+class SandboxError(Exception):
+    """Base class for Modal sandbox failures. Always retryable (§6.4)."""
+
+
+class SandboxGoneError(SandboxError):
+    """The sandbox disappeared mid-loop or could not be resolved by id (§8.3)."""
+
+
+class SandboxProvisionError(SandboxError):
+    """Sandbox provisioning failed."""
 
 
 class LLMClientError(Exception):
-    """Non-retryable: Anthropic 4xx (bad request / auth / permission denied)."""
+    """A non-retryable Anthropic API error (4xx: bad request / auth / permission)."""
 
 
-class SandboxGoneError(Exception):
-    """Retryable: the Modal sandbox is unreachable or has terminated."""
+class LLMRateLimitError(Exception):
+    """Anthropic 429. Retryable."""
+
+
+class LLMServerError(Exception):
+    """Anthropic 5xx. Retryable."""
+
+
+class LLMConnectionError(Exception):
+    """Anthropic connection/timeout error. Retryable."""
 
 
 class ToolExecutionError(Exception):
-    """Not used for normal non-zero tool exit (that's a result, not a raise)."""
+    """Reserved for genuine tool-activity transport failures (not a non-zero
+    exit code, which is a normal tool result, not an exception — §9.4)."""
 
 
-def classify(exc: BaseException) -> tuple[ErrorCategory, bool]:
-    """Map an exception to (error_category, retryable) per SPEC.md §14.1."""
+class ErrorClassification(NamedTuple):
+    category: ErrorCategory
+    retryable: bool
+
+
+def classify(exc: BaseException) -> ErrorClassification:
+    """Classify an exception into (error_category, retryable).
+
+    Order matters: subclasses are checked before their bases, and the
+    LLM-specific types are checked before the generic fallback.
+    """
 
     if isinstance(exc, ValidationError):
-        return ErrorCategory.VALIDATION, False
+        return ErrorClassification(ErrorCategory.VALIDATION, False)
+
+    if isinstance(exc, SandboxError):
+        return ErrorClassification(ErrorCategory.SANDBOX, True)
+
     if isinstance(exc, LLMClientError):
-        return ErrorCategory.LLM, False
-    if isinstance(exc, SandboxGoneError):
-        return ErrorCategory.SANDBOX, True
+        return ErrorClassification(ErrorCategory.LLM, False)
 
-    name = type(exc).__name__
-    if name in ("RateLimitError", "APIStatusError", "APIConnectionError"):
-        return ErrorCategory.LLM, True
-    if name == "NotFoundError":
-        return ErrorCategory.SANDBOX, True
-    if name == "TimeoutError" or isinstance(exc, TimeoutError):
-        return ErrorCategory.TIMEOUT, True
+    if isinstance(exc, (LLMRateLimitError, LLMServerError, LLMConnectionError)):
+        return ErrorClassification(ErrorCategory.LLM, True)
 
-    return ErrorCategory.INTERNAL, True
+    if isinstance(exc, ToolExecutionError):
+        return ErrorClassification(ErrorCategory.TOOL, False)
+
+    if isinstance(exc, TimeoutError):
+        return ErrorClassification(ErrorCategory.TIMEOUT, True)
+
+    return ErrorClassification(ErrorCategory.INTERNAL, True)

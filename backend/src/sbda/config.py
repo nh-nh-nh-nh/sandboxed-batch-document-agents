@@ -1,18 +1,14 @@
-# STUB — owned by the backend-foundation slice (see SPEC.md §12, §2).
-#
-# This is a minimal implementation of `sbda.config.settings` sufficient for the
-# temporal/agent/sandbox slice (workflows, activities, agent runtime, and their
-# tests) to import `from sbda.config import settings` and get the fields it
-# needs, with defaults matching SPEC.md §12 exactly. Reconcile against the
-# backend-foundation PR's real `config.py` — in particular, that PR may add a
-# real pydantic-settings `BaseSettings` subclass with additional validation
-# (e.g. "missing ANTHROPIC_API_KEY raises at import/startup", "malformed
-# DATABASE_URL fails fast") described in SPEC.md §14.1 `test_config.py`, which
-# this stub does not fully implement.
+"""Application configuration (SPEC.md §12).
+
+pydantic-settings loads every value from the environment / `.env`, with
+defaults matching `.env.example` exactly.
+"""
 
 from __future__ import annotations
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
@@ -20,6 +16,15 @@ class Settings(BaseSettings):
 
     # --- Postgres ---
     database_url: str = "postgresql+asyncpg://sbda:sbda@localhost:5432/sbda"
+
+    @field_validator("database_url")
+    @classmethod
+    def _validate_database_url(cls, v: str) -> str:
+        try:
+            make_url(v)
+        except Exception as e:
+            raise ValueError(f"Malformed DATABASE_URL: {v!r} ({e})") from e
+        return v
 
     # --- S3 / MinIO ---
     s3_endpoint_url: str = "http://localhost:9000"
@@ -34,7 +39,6 @@ class Settings(BaseSettings):
     temporal_task_queue: str = "document-analysis"
     worker_max_concurrent_activities: int = 16
     worker_max_concurrent_workflow_tasks: int = 100
-    worker_max_concurrent_local_activities: int = 16
 
     # --- Anthropic ---
     anthropic_api_key: str = ""
@@ -56,7 +60,25 @@ class Settings(BaseSettings):
     max_file_bytes: int = 1_048_576
     max_submission_bytes: int = 104_857_600
     tool_output_max_bytes: int = 32_768
-    agent_max_turns: int = 25  # 0 = unlimited
+    agent_max_turns: int = 25  # 0 = unlimited (see §9.5)
+
+    # --- API ---
+    upload_request_timeout_s: int = 600
+    cors_origins: list[str] = ["http://localhost:5173"]
+
+    def require_anthropic_credentials(self) -> None:
+        if not self.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is required but not set")
+
+    def require_modal_credentials(self) -> None:
+        if not self.modal_token_id:
+            raise RuntimeError("MODAL_TOKEN_ID is required but not set")
+        if not self.modal_token_secret:
+            raise RuntimeError("MODAL_TOKEN_SECRET is required but not set")
 
 
-settings = Settings()
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
