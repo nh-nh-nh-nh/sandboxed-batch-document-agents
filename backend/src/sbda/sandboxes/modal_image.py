@@ -22,7 +22,7 @@ from functools import lru_cache
 
 import modal
 
-APP_NAME = "sbda-sandboxes"
+APP_NAME = "sandboxed-batch-document-agents"
 
 
 @lru_cache(maxsize=1)

@@ -44,33 +44,6 @@ services:
       exit 0
       "
 
-  temporal:
-    image: temporalio/auto-setup:latest
-    environment:
-      - DB=postgres12
-      - DB_PORT=5432
-      - POSTGRES_USER=sbda
-      - POSTGRES_PWD=sbda
-      - POSTGRES_SEEDS=postgres
-      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development.yaml
-    ports:
-      - "7233:7233"
-    volumes:
-      - ./infra/dynamicconfig:/etc/temporal/config/dynamicconfig
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  temporal-ui:
-    image: temporalio/ui:latest
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
-    ports:
-      - "8080:8080"
-    depends_on:
-      - temporal
-
 volumes:
   pgdata:
   miniodata:
