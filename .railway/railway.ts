@@ -1,4 +1,4 @@
-import { bucket, defineRailway, github, postgres, project, ref, service, volume } from "railway/iac";
+import { bucket, defineRailway, github, postgres, preserve, project, ref, service, volume } from "railway/iac";
 
 export default defineRailway(() => {
   const sandboxedBatchDocumentAgents = github("nh-nh-nh-nh/sandboxed-batch-document-agents", { checkSuites: false });
@@ -23,7 +23,11 @@ export default defineRailway(() => {
     ANTHROPIC_MODEL: "claude-sonnet-5",
     ANTHROPIC_MAX_TOKENS: "8192",
     ANTHROPIC_EFFORT: "medium",
+    ANTHROPIC_API_KEY: preserve(),
     MODAL_APP_NAME: "sandboxed-batch-document-agents",
+    MODAL_TOKEN_ID: preserve(),
+    MODAL_TOKEN_SECRET: preserve(),
+    TEMPORAL_API_KEY: preserve(),
     SANDBOX_TIMEOUT_S: "1200",
     SANDBOX_CPU: "0.25",
     SANDBOX_MEMORY_MB: "1024",
@@ -46,14 +50,14 @@ export default defineRailway(() => {
   const backendApi = service("backend-api", {
     source: sandboxedBatchDocumentAgents,
     rootDirectory: "backend",
-    preDeploy: "uv run alembic upgrade head",
+    preDeploy: "uv run alembic upgrade head && uv run python -m sbda.db.seed",
     start: "uv run uvicorn sbda.api.main:app --host 0.0.0.0 --port $PORT",
     healthcheck: "/health",
     replicas: { "sfo": 1 },
     env: {
       ...sharedEnv,
       UPLOAD_REQUEST_TIMEOUT_S: "600",
-      CORS_ORIGINS: '["https://frontend-production-0d39.up.railway.app"]',
+      CORS_ORIGINS: '["https://frontend-production-6b0c.up.railway.app"]',
     },
   });
 
@@ -61,7 +65,7 @@ export default defineRailway(() => {
     source: sandboxedBatchDocumentAgents,
     rootDirectory: "frontend",
     build: "npm run build",
-    start: "npx --yes serve -s dist -l $PORT",
+    start: "npx --yes serve -s dist -l tcp://0.0.0.0:$PORT",
     replicas: { "sfo": 1 },
     env: {
       VITE_API_BASE_URL: "https://backend-api-production-c560.up.railway.app",
