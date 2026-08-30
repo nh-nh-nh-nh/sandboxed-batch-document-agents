@@ -76,6 +76,13 @@ def _truncate_error_message(message: str | None) -> str | None:
     return message[:_ERROR_MESSAGE_MAX_CHARS]
 
 
+def _now_naive_utc() -> datetime:
+    """`started_at`/`finished_at` are TIMESTAMP WITHOUT TIME ZONE columns
+    (like every other timestamp in this schema) — strip tzinfo so asyncpg
+    doesn't reject a tz-aware value against a naive column."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 @activity.defn
 async def mark_submission_running(input: MarkSubmissionRunningInput) -> None:
     session_factory = _get_sessionmaker()
@@ -131,7 +138,7 @@ async def mark_file_running(input: MarkFileRunningInput) -> None:
             .values(
                 status=FileStatus.RUNNING,
                 attempt_count=input.attempt,
-                started_at=datetime.now(timezone.utc),
+                started_at=_now_naive_utc(),
             )
         )
         await session.commit()
@@ -151,7 +158,7 @@ async def mark_file_succeeded(input: MarkFileSucceededInput) -> None:
                 output_tokens=input.output_tokens,
                 cache_read_tokens=input.cache_read_tokens,
                 turn_count=input.turn_count,
-                finished_at=datetime.now(timezone.utc),
+                finished_at=_now_naive_utc(),
             )
         )
         await session.commit()
@@ -168,7 +175,7 @@ async def mark_file_failed(input: MarkFileFailedInput) -> None:
                 status=FileStatus.FAILED,
                 error_category=ErrorCategory(input.error_category),
                 error_message=_truncate_error_message(input.error_message),
-                finished_at=datetime.now(timezone.utc),
+                finished_at=_now_naive_utc(),
             )
         )
         await session.commit()
