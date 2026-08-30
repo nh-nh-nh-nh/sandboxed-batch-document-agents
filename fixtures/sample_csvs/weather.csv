@@ -1,0 +1,11 @@
+date,city,temperature_c,humidity_pct,condition
+2024-06-01,New York,24.5,60,Sunny
+2024-06-01,Chicago,21.0,55,Cloudy
+2024-06-01,Miami,29.3,78,Humid
+2024-06-02,New York,25.1,58,Sunny
+2024-06-02,Chicago,19.8,62,Rainy
+2024-06-02,Miami,30.0,80,Humid
+2024-06-03,New York,22.7,65,Cloudy
+2024-06-03,Chicago,18.5,70,Rainy
+2024-06-03,Miami,28.9,75,Sunny
+2024-06-04,New York,26.3,50,Sunny

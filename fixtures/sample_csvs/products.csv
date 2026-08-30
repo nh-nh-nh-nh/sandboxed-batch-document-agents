@@ -1,0 +1,11 @@
+product_id,name,category,price,in_stock
+101,Widget A,Widgets,9.99,true
+102,Widget B,Widgets,14.99,true
+103,Gadget A,Gadgets,24.99,false
+104,Gadget B,Gadgets,19.99,true
+105,Gizmo A,Gizmos,49.99,true
+106,Gizmo B,Gizmos,39.99,false
+107,Doohickey A,Doohickeys,4.99,true
+108,Doohickey B,Doohickeys,6.99,true
+109,Thingamajig A,Thingamajigs,99.99,true
+110,Thingamajig B,Thingamajigs,89.99,false
