@@ -229,6 +229,8 @@ class FileAnalysisWorkflow:
                                 tool_name=block["name"],
                                 tool_input=block.get("input", {}),
                                 turn_index=turn,
+                                file_id=input.file_id,
+                                sanitized_filename=input.sanitized_filename,
                             ),
                             start_to_close_timeout=EXEC_TOOL_START_TO_CLOSE_TIMEOUT,
                             retry_policy=EXEC_TOOL_RETRY_POLICY,

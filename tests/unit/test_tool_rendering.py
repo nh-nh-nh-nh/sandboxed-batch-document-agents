@@ -7,7 +7,12 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from sbda.agent.runtime import render_read_file_source, render_tool_output
+from sbda.agent.runtime import (
+    render_read_file_source,
+    render_tool_output,
+    version_dir,
+    version_path,
+)
 
 TOOL_OUTPUT_MAX_BYTES = 32768
 
@@ -108,3 +113,18 @@ def test_read_file_respects_max_bytes_and_flags_truncation(tmp_path):
     assert proc.returncode == 0
     assert proc.stdout == "y" * 10
     assert "truncated" in proc.stderr
+
+
+def test_version_dir_is_scoped_by_file_id():
+    assert version_dir("f1") == "/work/.versions/f1"
+    assert version_dir("f2") == "/work/.versions/f2"
+
+
+def test_version_path_includes_zero_padded_turn_index_and_filename():
+    assert version_path("f1", 0, "in.csv") == "/work/.versions/f1/v0000_in.csv"
+    assert version_path("f1", 12, "in.csv") == "/work/.versions/f1/v0012_in.csv"
+
+
+def test_version_path_strictly_increasing_with_turn_index():
+    paths = [version_path("f1", n, "in.csv") for n in (0, 1, 2, 10)]
+    assert paths == sorted(paths)

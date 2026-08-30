@@ -47,6 +47,29 @@ class FakeOpenFile:
         self.sandbox.written[self.path] += data
 
 
+class FakeAioWriter:
+    """Fakes `sb.filesystem.write_bytes` / `.write_text` — each exposes an
+    `.aio(data, path)` coroutine, matching the real Modal sandbox filesystem
+    API used by `provision_sandbox`/`exec_tool`.
+    """
+
+    def __init__(self, sandbox):
+        self.sandbox = sandbox
+
+    async def aio(self, data, path):
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        else:
+            data = bytes(data)
+        self.sandbox.written[path] = self.sandbox.written.get(path, b"") + data
+
+
+class FakeFilesystem:
+    def __init__(self, sandbox):
+        self.write_bytes = FakeAioWriter(sandbox)
+        self.write_text = FakeAioWriter(sandbox)
+
+
 class FakeSandbox:
     _registry: dict[str, "FakeSandbox"] = {}
 
@@ -57,6 +80,7 @@ class FakeSandbox:
         self.exec_queue: list[tuple[str, str, int]] = []
         self.terminate_calls = 0
         self.terminated = False
+        self.filesystem = FakeFilesystem(self)
         FakeSandbox._registry[object_id] = self
 
     def open(self, path, mode="wb"):
@@ -180,6 +204,8 @@ async def test_provision_sandbox_zero_byte_file_raises_validation_error(monkeypa
 
 async def test_exec_tool_resolves_sandbox_with_from_id_every_call():
     sb = FakeSandbox.create()
+    sb.exec_queue.append(("", "", 0))  # mkdir -p (version snapshot)
+    sb.exec_queue.append(("", "", 0))  # cp (version snapshot)
     sb.exec_queue.append(("ok\n", "", 0))
 
     result = await sandbox_mod.exec_tool(
@@ -225,6 +251,67 @@ async def test_run_python_writes_code_to_file_never_shell_interpolated():
     for call in sb.exec_calls:
         assert dangerous_code not in call
         assert all("rm -rf" not in str(a) for a in call)
+
+
+async def test_run_python_snapshots_versioned_copy_before_exec():
+    sb = FakeSandbox.create()
+    sb.exec_queue.append(("mkdir-ok\n", "", 0))  # mkdir -p
+    sb.exec_queue.append(("cp-ok\n", "", 0))  # cp
+    sb.exec_queue.append(("ran\n", "", 0))  # python <cell>
+
+    await sandbox_mod.exec_tool(
+        sandbox_mod.ExecToolInput(
+            sandbox_id=sb.object_id,
+            tool_name="run_python",
+            tool_input={"code": "print('ran')"},
+            turn_index=3,
+            file_id="f1",
+            sanitized_filename="in.csv",
+        )
+    )
+
+    mkdir_call, cp_call, python_call = sb.exec_calls
+    assert mkdir_call == ("mkdir", "-p", "/work/.versions/f1")
+    assert cp_call == ("cp", "-p", "/work/input/in.csv", "/work/.versions/f1/v0003_in.csv")
+    assert python_call[0] == "python"
+
+
+async def test_run_python_snapshot_ignores_cp_failure():
+    sb = FakeSandbox.create()
+    sb.exec_queue.append(("", "", 0))  # mkdir -p
+    sb.exec_queue.append(("", "no such file\n", 1))  # cp fails: source already moved
+    sb.exec_queue.append(("ran\n", "", 0))  # python <cell> still runs
+
+    result = await sandbox_mod.exec_tool(
+        sandbox_mod.ExecToolInput(
+            sandbox_id=sb.object_id,
+            tool_name="run_python",
+            tool_input={"code": "print('ran')"},
+            turn_index=0,
+            file_id="f1",
+            sanitized_filename="in.csv",
+        )
+    )
+    assert "ran" in result.content
+    assert result.is_error is False
+
+
+async def test_read_file_does_not_create_version_snapshot():
+    sb = FakeSandbox.create()
+    sb.exec_queue.append(("data\n", "", 0))
+
+    await sandbox_mod.exec_tool(
+        sandbox_mod.ExecToolInput(
+            sandbox_id=sb.object_id,
+            tool_name="read_file",
+            tool_input={"path": "input/in.csv"},
+            turn_index=0,
+            file_id="f1",
+            sanitized_filename="in.csv",
+        )
+    )
+
+    assert not any(call[0] in ("mkdir", "cp") for call in sb.exec_calls)
 
 
 async def test_terminate_sandbox_on_already_gone_succeeds():

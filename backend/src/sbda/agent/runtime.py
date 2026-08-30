@@ -31,11 +31,37 @@ from sbda.core.truncate import truncate_output as truncate
 
 CELL_DIR = "/work/.agent"
 
+# `VERSIONS_DIR` is where `exec_tool` snapshots a copy of the input file
+# before each `run_python` call actually runs (see `exec_tool` in
+# `temporal/activities/sandbox.py`). It is scoped per `file_id` so that, if
+# this path is ever backed by a mounted Modal Volume instead of the
+# sandbox's own ephemeral disk, the same versioned history would start
+# surviving sandbox loss without any call site changing. Today it is plain
+# local disk and is lost with the rest of `/work` when the sandbox goes away
+# — this only shapes the code for that future swap, it does not implement
+# resuming a workflow from a snapshot.
+VERSIONS_DIR = "/work/.versions"
+
 _DELIMITER_TOKENS = ("<stdout>", "</stdout>", "<stderr>", "</stderr>")
 
 
 def cell_path(turn_index: int) -> str:
     return f"{CELL_DIR}/cell_{turn_index}.py"
+
+
+def version_dir(file_id: str) -> str:
+    return f"{VERSIONS_DIR}/{file_id}"
+
+
+def version_path(file_id: str, turn_index: int, sanitized_filename: str) -> str:
+    """Path for the versioned snapshot of `sanitized_filename` taken before
+    the `turn_index`-th `run_python` call. `turn_index` is reused as-is from
+    the workflow's existing per-tool-call counter (already used by
+    `cell_path`), so version numbers may skip between `run_python` calls
+    (e.g. a `read_file` call in between) — the sequence is still strictly
+    increasing, which is all "latest" needs.
+    """
+    return f"{version_dir(file_id)}/v{turn_index:04d}_{sanitized_filename}"
 
 
 def render_run_python_source(code: str) -> str:
