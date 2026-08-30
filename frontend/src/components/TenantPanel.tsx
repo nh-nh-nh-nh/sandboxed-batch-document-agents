@@ -78,8 +78,8 @@ export function TenantPanel({ tenant }: TenantPanelProps) {
   }
 
   return (
-    <section className="flex flex-col gap-4 border-border bg-canvas p-4 md:border-r md:last:border-r-0">
-      <header className="sticky top-0 z-10 -mx-4 border-b border-border bg-canvas/95 px-4 py-2 backdrop-blur">
+    <section className="flex flex-col gap-4 rounded-xl border border-border bg-surface p-6 shadow-sm">
+      <header className="sticky top-0 z-10 -mx-6 -mt-6 rounded-t-xl border-b border-border bg-surface/95 px-6 py-3 backdrop-blur">
         <h2 className="text-base font-semibold text-ink">
           {tenant.display_name}
         </h2>

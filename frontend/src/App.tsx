@@ -37,7 +37,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-canvas">
-      <div className="grid grid-cols-1 md:grid-cols-2">
+      <div className="mx-auto grid max-w-6xl grid-cols-1 gap-6 px-6 py-8 md:grid-cols-2">
         {tenants.map((tenant) => (
           <TenantPanel key={tenant.id} tenant={tenant} />
         ))}
