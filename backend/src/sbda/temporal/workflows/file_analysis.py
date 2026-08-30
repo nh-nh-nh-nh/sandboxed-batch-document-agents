@@ -25,7 +25,15 @@ with workflow.unsafe.imports_passed_through():
     )
     from sbda.agent.prompts import TURN_LIMIT_MESSAGE, build_initial_user_message
     from sbda.config import settings
-    from sbda.core.errors import LLMClientError, SandboxGoneError, ValidationError, classify
+    from sbda.core.errors import (
+        LLMClientError,
+        LLMConnectionError,
+        LLMRateLimitError,
+        LLMServerError,
+        SandboxGoneError,
+        ValidationError,
+        classify,
+    )
     from sbda.core.report import ReportValidationError, validate_report
     from sbda.db.models import ErrorCategory, FileStatus
     from sbda.temporal.activities.db import (
@@ -66,6 +74,9 @@ _KNOWN_EXCEPTION_TYPES = {
     "ValidationError": ValidationError,
     "LLMClientError": LLMClientError,
     "SandboxGoneError": SandboxGoneError,
+    "RateLimitError": LLMRateLimitError,
+    "APIStatusError": LLMServerError,
+    "APIConnectionError": LLMConnectionError,
 }
 
 
@@ -83,25 +94,51 @@ def _root_cause(exc: BaseException) -> BaseException:
     return current
 
 
+def _any_non_retryable(exc: BaseException) -> bool:
+    """Whether any exception in the `cause` chain was explicitly marked
+    `non_retryable=True`. Unlike `_root_cause`, this must inspect every link,
+    not just the innermost one: `raise ApplicationError(..., non_retryable=True)
+    from e` round-trips across the activity/workflow boundary as an outer
+    ApplicationError (carrying the flag) wrapping an inner, auto-wrapped
+    ApplicationError for `e` itself (which never carries it) — so checking
+    only `_root_cause(exc)` would always see `non_retryable=False`.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if getattr(current, "non_retryable", False):
+            return True
+        seen.add(id(current))
+        current = getattr(current, "cause", None)
+    return False
+
+
 def _classify_for_workflow(exc: BaseException):
     """`classify()` (core/errors.py) is pure and only knows about real
     exception *instances*. By the time an activity failure reaches workflow
     code it has been wrapped (and re-typed to a generic ApplicationError) by
     Temporal, so reconstruct a same-named instance where we can before
-    delegating to the pure classifier.
+    delegating to the pure classifier. An explicit `non_retryable=True`
+    anywhere in the cause chain (e.g. `call_claude` exhausting its own
+    per-error-type retry budget) always overrides `classify()`'s verdict,
+    since that's a statement about this specific occurrence, not the general
+    error class.
     """
     root = _root_cause(exc)
     type_name = getattr(root, "type", None) or type(root).__name__
 
     cls = _KNOWN_EXCEPTION_TYPES.get(type_name)
     if cls is not None:
-        return classify(cls(str(root)))
-
-    if type_name in ("RateLimitError", "APIStatusError", "APIConnectionError", "NotFoundError", "TimeoutError"):
+        category, retryable = classify(cls(str(root)))
+    elif type_name in ("NotFoundError", "TimeoutError"):
         synthetic = type(type_name, (Exception,), {})
-        return classify(synthetic(str(root)))
+        category, retryable = classify(synthetic(str(root)))
+    else:
+        category, retryable = classify(root)
 
-    return classify(root)
+    if _any_non_retryable(exc):
+        retryable = False
+    return category, retryable
 
 
 @workflow.defn

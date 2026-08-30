@@ -11,6 +11,7 @@ from datetime import timedelta
 from temporalio.common import Priority, RetryPolicy
 
 from sbda.core.errors import LLMClientError, ValidationError
+from sbda.temporal.activities.llm import MAX_OTHER_RETRYABLE_ATTEMPTS, MAX_RATE_LIMIT_ATTEMPTS
 
 TASK_QUEUE = "document-analysis"
 
@@ -86,7 +87,10 @@ CHILD_WORKFLOW_RETRY_POLICY = RetryPolicy(
 )
 
 CALL_CLAUDE_RETRY_POLICY = RetryPolicy(
-    maximum_attempts=5,
+    # Outer safety net above the per-error-type budgets the activity enforces
+    # itself via heartbeat-persisted counters (temporal/activities/llm.py) —
+    # derived from those same constants so the two can't silently drift.
+    maximum_attempts=MAX_RATE_LIMIT_ATTEMPTS + MAX_OTHER_RETRYABLE_ATTEMPTS + 7,
     initial_interval=timedelta(seconds=2),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=60),
