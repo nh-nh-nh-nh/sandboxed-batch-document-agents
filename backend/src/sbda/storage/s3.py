@@ -20,7 +20,26 @@ from sbda.core.naming import build_s3_key
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["S3Client", "UploadTooLargeError", "build_s3_key"]
+__all__ = ["S3Client", "UploadTooLargeError", "build_s3_key", "get_s3_client"]
+
+
+def get_s3_client(s: Settings | None = None):
+    """Return a raw boto3 S3 client configured from settings.
+
+    Used by call sites (e.g. the sandbox-provisioning activity) that need
+    the plain boto3 API (``Bucket=``/``Key=`` kwargs, chunked
+    ``Body.read(n)``) rather than the ``S3Client`` convenience wrapper.
+    """
+
+    s = s or default_settings
+    return boto3.client(
+        "s3",
+        endpoint_url=s.s3_endpoint_url,
+        aws_access_key_id=s.aws_access_key_id,
+        aws_secret_access_key=s.aws_secret_access_key,
+        region_name=s.aws_region,
+        config=BotoConfig(signature_version="s3v4"),
+    )
 
 
 class UploadTooLargeError(Exception):
