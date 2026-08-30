@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from temporalio.common import Priority, RetryPolicy
 
-from sbda.core.errors import LLMClientError, ValidationError
+from sbda.core.errors import LLMClientError, SandboxGoneError, ValidationError
 from sbda.temporal.activities.llm import MAX_OTHER_RETRYABLE_ATTEMPTS, MAX_RATE_LIMIT_ATTEMPTS
 
 TASK_QUEUE_WORKFLOW = "document-analysis-workflow"
@@ -111,11 +111,16 @@ RECOVER_SANDBOX_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 
 # Transport-level retries only — a non-zero exit from the tool code itself is a
 # normal (non-exceptional) activity result, not a failure Temporal retries.
+# SandboxGoneError is excluded: exec_tool only raises it once it has positively
+# identified the sandbox as gone (see `_looks_like_sandbox_gone`), so retrying
+# it here would just re-fail against the same dead sandbox for ~90s before the
+# workflow's snapshot-based mid-loop recovery (file_analysis.py) ever runs.
 EXEC_TOOL_RETRY_POLICY = RetryPolicy(
-    maximum_attempts=10,
-    initial_interval=timedelta(seconds=10),
+    maximum_attempts=2,
+    initial_interval=timedelta(seconds=5),
     backoff_coefficient=1.0,
-    maximum_interval=timedelta(seconds=10),
+    maximum_interval=timedelta(seconds=5),
+    non_retryable_error_types=[SandboxGoneError.__name__],
 )
 
 # Must not leak a sandbox: retried aggressively, for a long time.
@@ -135,6 +140,7 @@ MARK_DB_RETRY_POLICY = RetryPolicy(
 # Short aliases used by tests/unit/test_errors.py (SPEC.md §14.1).
 CHILD_RETRY = CHILD_WORKFLOW_RETRY_POLICY
 CALL_CLAUDE_RETRY = CALL_CLAUDE_RETRY_POLICY
+EXEC_TOOL_RETRY = EXEC_TOOL_RETRY_POLICY
 
 
 def fairness_priority(tenant_id: str) -> Priority:
