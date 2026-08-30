@@ -17,9 +17,11 @@ export default defineRailway(() => {
     TEMPORAL_ADDRESS: "sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233",
     TEMPORAL_NAMESPACE: "sandboxed-batch-document-agents.ast5h",
     TEMPORAL_TLS: "true",
-    TEMPORAL_TASK_QUEUE: "document-analysis",
-    WORKER_MAX_CONCURRENT_ACTIVITIES: "16",
-    WORKER_MAX_CONCURRENT_WORKFLOW_TASKS: "100",
+    WORKER_MAX_CONCURRENT_ACTIVITIES: "10",
+    WORKER_MAX_CONCURRENT_LLM_ACTIVITIES: "16",
+    WORKER_MAX_CONCURRENT_TERMINATE_ACTIVITIES: "4",
+    WORKER_MAX_CONCURRENT_WORKFLOW_TASKS: "5",
+    WORKER_WORKFLOW_TASK_EXECUTOR_THREADS: "5",
     ANTHROPIC_MODEL: "claude-sonnet-5",
     ANTHROPIC_MAX_TOKENS: "8192",
     ANTHROPIC_EFFORT: "medium",
@@ -39,10 +41,34 @@ export default defineRailway(() => {
     AGENT_MAX_TURNS: "25",
   };
 
-  const temporalWorker = service("temporal-worker", {
+  const workerWorkflow = service("temporal-worker-workflow", {
     source: sandboxedBatchDocumentAgents,
     rootDirectory: "backend",
-    start: "uv run python -m sbda.temporal.worker",
+    start: "uv run python -m sbda.temporal.worker workflow",
+    replicas: { "sfo": 1 },
+    env: sharedEnv,
+  });
+
+  const workerActivities = service("temporal-worker-activities", {
+    source: sandboxedBatchDocumentAgents,
+    rootDirectory: "backend",
+    start: "uv run python -m sbda.temporal.worker activities",
+    replicas: { "sfo": 1 },
+    env: sharedEnv,
+  });
+
+  const workerLlm = service("temporal-worker-llm", {
+    source: sandboxedBatchDocumentAgents,
+    rootDirectory: "backend",
+    start: "uv run python -m sbda.temporal.worker llm",
+    replicas: { "sfo": 1 },
+    env: sharedEnv,
+  });
+
+  const workerTerminate = service("temporal-worker-terminate", {
+    source: sandboxedBatchDocumentAgents,
+    rootDirectory: "backend",
+    start: "uv run python -m sbda.temporal.worker terminate",
     replicas: { "sfo": 1 },
     env: sharedEnv,
   });
@@ -73,6 +99,16 @@ export default defineRailway(() => {
   });
 
   return project("sandboxed-batch-document-agents", {
-    resources: [temporalWorker, frontend, Postgres, backendApi, postgresVolume, blobStorage],
+    resources: [
+      workerWorkflow,
+      workerActivities,
+      workerLlm,
+      workerTerminate,
+      frontend,
+      Postgres,
+      backendApi,
+      postgresVolume,
+      blobStorage,
+    ],
   });
 });

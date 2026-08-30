@@ -12,9 +12,15 @@ make migrate                # alembic upgrade head
 make seed                   # insert Company A + Company B tenants
 
 make api                    # uvicorn, :8000
-make worker                 # temporal worker
+make worker-workflow        # temporal worker: workflow tasks
+make worker-activities      # temporal worker: provision_sandbox/exec_tool/mark_* DB
+make worker-llm             # temporal worker: call_claude
+make worker-terminate       # temporal worker: terminate_sandbox
 make web                    # vite dev server, :5173
 ```
+
+Each `make worker-*` is a separate process polling its own task queue
+(SPEC.md §6.1) — all four need to be running for a submission to complete.
 
 Then open **http://localhost:5173** — the split-screen UI, one panel per
 seeded tenant (Company A / Company B).
@@ -25,13 +31,15 @@ seeded tenant (Company A / Company B).
 |---|---|
 | `ANTHROPIC_API_KEY` | the agentic loop calls `claude-sonnet-5` per file |
 | `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | each file is analyzed inside a Modal sandbox |
-| `TEMPORAL_API_KEY` | the worker and API connect to the Temporal Cloud namespace `sandboxed-batch-document-agents.ast5h` |
+| `TEMPORAL_API_KEY` | every worker and the API connect to the Temporal Cloud namespace `sandboxed-batch-document-agents.ast5h` |
 
 Postgres and MinIO are containerized by `make up` and need no credentials of
 their own beyond the defaults in `.env.example`. Temporal is **not**
 containerized — both local dev and production connect to the same Temporal
-Cloud namespace. The worker fails fast at startup with a clear message if
-any credential above is missing.
+Cloud namespace. Each worker fails fast at startup with a clear message if a
+credential its role needs is missing (`workflow` needs only
+`TEMPORAL_API_KEY`; `activities`/`terminate` also need the `MODAL_TOKEN_*`
+pair; `llm` also needs `ANTHROPIC_API_KEY`).
 
 ### Running the test suites
 
@@ -50,7 +58,7 @@ This is the one property that has to be demonstrated live — it lives in the
 Temporal Cloud service's scheduler, not in this codebase, so no automated
 test can assert it.
 
-1. Bring the full stack up (`make up migrate seed api worker web`)
+1. Bring the full stack up (`make up migrate seed api worker-workflow worker-activities worker-llm worker-terminate web`)
    and confirm **Settings → Fairness** is turned on for the
    `sandboxed-batch-document-agents.ast5h` namespace in the Temporal Cloud
    console (`cloud.temporal.io`) — the worker logs a startup warning if it
@@ -68,9 +76,9 @@ test can assert it.
    Workflows view: Company B's single file should start (transition out of
    `PENDING`/"Queued") well before Company A's 20-file backlog finishes,
    rather than queueing FIFO behind all of it. With
-   `WORKER_MAX_CONCURRENT_ACTIVITIES=16` (the default), this is visible as
-   B's file getting a slice of that concurrency alongside A's files, not
-   after them.
+   `WORKER_MAX_CONCURRENT_ACTIVITIES=10` (the default, on the
+   `document-analysis-activities` queue), this is visible as B's file getting
+   a slice of that concurrency alongside A's files, not after them.
 6. **Contrast run.** Turn the namespace's **Settings → Fairness** toggle off
    in the Temporal Cloud console and repeat steps 3–5. This time Company B's
    file should sit in `PENDING` until Company A's backlog has worked through

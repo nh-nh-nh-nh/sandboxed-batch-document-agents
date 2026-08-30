@@ -36,9 +36,11 @@ def test_defaults_match_env_example():
     assert s.temporal_address == "sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233"
     assert s.temporal_namespace == "sandboxed-batch-document-agents.ast5h"
     assert s.temporal_tls is True
-    assert s.temporal_task_queue == "document-analysis"
-    assert s.worker_max_concurrent_activities == 16
-    assert s.worker_max_concurrent_workflow_tasks == 100
+    assert s.worker_max_concurrent_activities == 10
+    assert s.worker_max_concurrent_llm_activities == 16
+    assert s.worker_max_concurrent_terminate_activities == 4
+    assert s.worker_max_concurrent_workflow_tasks == 5
+    assert s.worker_workflow_task_executor_threads == 5
     assert s.anthropic_model == "claude-sonnet-5"
     assert s.anthropic_max_tokens == 8192
     assert s.anthropic_effort == "medium"

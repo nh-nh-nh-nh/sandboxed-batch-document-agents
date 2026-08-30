@@ -8,14 +8,14 @@ from datetime import timedelta
 
 import pytest
 from temporalio.client import WorkflowFailureError
-from temporalio.worker import Replayer, Worker
+from temporalio.worker import Replayer
 
 from sbda.core.errors import SandboxGoneError, ValidationError, LLMClientError
-from sbda.temporal.shared import TASK_QUEUE, FileInput, FileRef, SubmissionInput
+from sbda.temporal.shared import TASK_QUEUE_WORKFLOW, FileInput, FileRef, SubmissionInput
 from sbda.temporal.workflows.file_analysis import FileAnalysisWorkflow
 from sbda.temporal.workflows.submission import SubmissionWorkflow
 
-from conftest import Recorder, Script, build_fake_activities, new_id
+from conftest import Recorder, Script, new_id, run_all_workers
 
 pytestmark = pytest.mark.asyncio
 
@@ -45,29 +45,19 @@ def tool_use_block(name, tool_input, block_id="tool_1"):
     return {"type": "tool_use", "id": block_id, "name": name, "input": tool_input}
 
 
-async def _worker(env, recorder, scripts):
-    return Worker(
-        env.client,
-        task_queue=TASK_QUEUE,
-        workflows=[SubmissionWorkflow, FileAnalysisWorkflow],
-        activities=build_fake_activities(recorder, scripts),
-    )
-
-
 async def test_parent_fans_out_n_children(temporal_env):
     env = temporal_env
     recorder = Recorder()
     ids = [new_id() for _ in range(3)]
     scripts = {i: Script(call_claude_turns=[([report_block()], "tool_use")]) for i in ids}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         result = await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(i) for i in ids]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert result.status == "SUCCEEDED"
@@ -81,14 +71,13 @@ async def test_all_succeed(temporal_env):
     ids = [new_id() for _ in range(3)]
     scripts = {i: Script(call_claude_turns=[([report_block()], "tool_use")]) for i in ids}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         result = await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(i) for i in ids]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert result.status == "SUCCEEDED"
@@ -101,14 +90,13 @@ async def test_all_fail(temporal_env):
     ids = [new_id() for _ in range(2)]
     scripts = {i: Script(provision_error=ValidationError) for i in ids}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         result = await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(i) for i in ids]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert result.status == "FAILED"
@@ -124,14 +112,13 @@ async def test_partial_success(temporal_env):
         bad_id: Script(provision_error=ValidationError),
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         result = await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(good_id), file_ref(bad_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert result.status == "PARTIALLY_SUCCEEDED"
@@ -147,14 +134,13 @@ async def test_one_child_failure_does_not_cancel_siblings(temporal_env):
         bad_id: Script(provision_error=ValidationError),
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(good_id), file_ref(bad_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[good_id].status == "SUCCEEDED"
@@ -167,14 +153,13 @@ async def test_child_retries_on_sandbox_gone(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(provision_error=SandboxGoneError)}  # every attempt fails
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         result = await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.mark_file_running_calls == [1, 2, 3]
@@ -189,14 +174,13 @@ async def test_validation_error_is_not_retried(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(provision_error=ValidationError)}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.mark_file_running_calls == [1]
@@ -219,7 +203,6 @@ async def test_llm_4xx_is_non_retryable(temporal_env):
     # script call_claude_turns to a sentinel the fake interprets, but our
     # conftest's call_claude fake doesn't support raising. Patch here.
     scripts = {file_id: Script()}
-    activities = build_fake_activities(recorder, scripts)
 
     # Replace the call_claude activity with one that always raises LLMClientError.
     from temporalio import activity as activity_module
@@ -228,22 +211,13 @@ async def test_llm_4xx_is_non_retryable(temporal_env):
     async def failing_call_claude(input):
         raise LLMClientError("bad request: invalid schema")
 
-    activities = [a for a in activities if getattr(a, "__name__", "") != "call_claude"] + [failing_call_claude]
-
-    worker = Worker(
-        env.client,
-        task_queue=TASK_QUEUE,
-        workflows=[SubmissionWorkflow, FileAnalysisWorkflow],
-        activities=activities,
-    )
-
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts, llm_activities=[failing_call_claude]):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.mark_file_running_calls == [1]  # exactly one workflow attempt
@@ -264,18 +238,17 @@ async def test_intermediate_attempts_do_not_write_failed(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
 
     # We can't easily observe "mid-run" state with execute_workflow (it waits
     # for completion), so assert the invariant indirectly: mark_file_failed
     # must not have been called before the final (3rd) attempt succeeded.
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "SUCCEEDED"
@@ -288,14 +261,13 @@ async def test_sandbox_terminated_on_success(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(call_claude_turns=[([report_block()], "tool_use")])}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.terminate_calls == [f"sb-{file_id}"]
@@ -307,14 +279,13 @@ async def test_sandbox_terminated_on_failure(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(call_claude_turns=[([{"type": "text", "text": "oops"}], "end_turn")])}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     # 3 workflow attempts, each provisions + terminates its own sandbox.
@@ -328,14 +299,13 @@ async def test_no_sandbox_terminate_when_provision_failed(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(provision_error=ValidationError)}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.terminate_calls == []
@@ -355,14 +325,13 @@ async def test_agent_loop_multi_turn(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "SUCCEEDED"
@@ -390,14 +359,13 @@ async def test_agent_loop_parallel_tool_calls(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "SUCCEEDED"
@@ -424,14 +392,13 @@ async def test_malformed_report_is_returned_as_tool_error(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "SUCCEEDED"
@@ -444,14 +411,13 @@ async def test_loop_ends_on_end_turn_without_report(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(call_claude_turns=[([{"type": "text", "text": "done"}], "end_turn")])}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "FAILED"
@@ -471,14 +437,13 @@ async def test_loop_stops_at_default_cap(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     # 25 call_claude turns exactly: 24 tool_use turns + the forced turn 25
@@ -503,14 +468,13 @@ async def test_final_turn_forces_report(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     last_request_messages = recorder.call_claude_calls[-1]
@@ -532,14 +496,13 @@ async def test_cap_reached_is_success_not_failure(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         result = await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "SUCCEEDED"
@@ -562,14 +525,13 @@ async def test_turn_count_recorded_below_cap(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].turn_count == 4
@@ -592,14 +554,13 @@ async def test_agent_max_turns_zero_is_unlimited(temporal_env, monkeypatch):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     assert recorder.files[file_id].status == "SUCCEEDED"
@@ -621,17 +582,7 @@ async def test_child_run_timeout(temporal_env):
     # Every activity except call_claude is registered normally, so
     # provisioning succeeds (and the sandbox is later terminated via the
     # `finally` block) but no worker ever completes the call_claude task.
-    all_activities = build_fake_activities(recorder, scripts)
-    activities_without_llm = [a for a in all_activities if getattr(a, "__name__", "") != "call_claude"]
-
-    worker = Worker(
-        env.client,
-        task_queue=TASK_QUEUE,
-        workflows=[SubmissionWorkflow, FileAnalysisWorkflow],
-        activities=activities_without_llm,
-    )
-
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts, skip_llm=True):
         with pytest.raises(WorkflowFailureError):
             await env.client.execute_workflow(
                 FileAnalysisWorkflow.run,
@@ -645,7 +596,7 @@ async def test_child_run_timeout(temporal_env):
                     sanitized_filename=file_id,
                 ),
                 id=f"file-{file_id}",
-                task_queue=TASK_QUEUE,
+                task_queue=TASK_QUEUE_WORKFLOW,
                 run_timeout=timedelta(minutes=1),
             )
 
@@ -664,14 +615,13 @@ async def test_stale_rows_repaired_on_fan_in(temporal_env):
     recorder.file(file_id).status = "RUNNING"  # pre-existing stale row
 
     scripts = {file_id: Script(call_claude_turns=[([report_block()], "tool_use")])}
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         await env.client.execute_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
 
     # The real child ran and succeeded, overwriting the pre-seeded RUNNING
@@ -685,15 +635,14 @@ async def test_fairness_priority_is_set(temporal_env):
     file_id = new_id()
     scripts = {file_id: Script(call_claude_turns=[([report_block()], "tool_use")])}
 
-    worker = await _worker(env, recorder, scripts)
     submission_id = new_id()
     tenant_id = "tenant-fairness-check"
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         handle = await env.client.start_workflow(
             SubmissionWorkflow.run,
             SubmissionInput(submission_id=submission_id, tenant_id=tenant_id, files=[file_ref(file_id)]),
             id=f"submission-{submission_id}",
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
         await handle.result()
 
@@ -724,9 +673,8 @@ async def test_workflow_determinism_replay(temporal_env):
         )
     }
 
-    worker = await _worker(env, recorder, scripts)
     workflow_id = f"file-{file_id}"
-    async with worker:
+    async with run_all_workers(env.client, recorder, scripts):
         handle = await env.client.start_workflow(
             FileAnalysisWorkflow.run,
             FileInput(
@@ -739,7 +687,7 @@ async def test_workflow_determinism_replay(temporal_env):
                 sanitized_filename=file_id,
             ),
             id=workflow_id,
-            task_queue=TASK_QUEUE,
+            task_queue=TASK_QUEUE_WORKFLOW,
         )
         await handle.result()
         history = await handle.fetch_history()

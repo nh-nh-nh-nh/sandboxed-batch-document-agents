@@ -10,7 +10,7 @@ import temporalio.exceptions
 from temporalio.client import Client
 
 from sbda.api.deps import FileRef, WorkflowAlreadyStartedError
-from sbda.temporal.shared import TASK_QUEUE, FileRef as WorkflowFileRef, SubmissionInput
+from sbda.temporal.shared import TASK_QUEUE_WORKFLOW, FileRef as WorkflowFileRef, SubmissionInput
 from sbda.temporal.workflows.submission import SubmissionWorkflow
 
 
@@ -42,7 +42,7 @@ class RealTemporalClient:
                     ],
                 ),
                 id=f"submission-{submission_id}",
-                task_queue=TASK_QUEUE,
+                task_queue=TASK_QUEUE_WORKFLOW,
             )
         except temporalio.exceptions.WorkflowAlreadyStartedError as e:
             raise WorkflowAlreadyStartedError from e

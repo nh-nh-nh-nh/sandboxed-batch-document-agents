@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
         CHILD_WORKFLOW_RETRY_POLICY,
         FILE_WORKFLOW_RUN_TIMEOUT,
         MARK_DB_RETRY_POLICY,
+        TASK_QUEUE_ACTIVITIES,
         FileInput,
         SubmissionInput,
         SubmissionResult,
@@ -44,6 +45,7 @@ class SubmissionWorkflow:
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=MARK_DB_RETRY_POLICY,
             priority=priority,
+            task_queue=TASK_QUEUE_ACTIVITIES,
         )
 
         handles = [
@@ -93,6 +95,7 @@ class SubmissionWorkflow:
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=MARK_DB_RETRY_POLICY,
             priority=priority,
+            task_queue=TASK_QUEUE_ACTIVITIES,
         )
 
         return SubmissionResult(

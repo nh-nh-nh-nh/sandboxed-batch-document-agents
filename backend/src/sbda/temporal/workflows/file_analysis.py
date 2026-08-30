@@ -62,6 +62,9 @@ with workflow.unsafe.imports_passed_through():
         MARK_DB_RETRY_POLICY,
         PROVISION_SANDBOX_RETRY_POLICY,
         PROVISION_SANDBOX_START_TO_CLOSE_TIMEOUT,
+        TASK_QUEUE_ACTIVITIES,
+        TASK_QUEUE_LLM,
+        TASK_QUEUE_TERMINATE,
         TERMINATE_SANDBOX_RETRY_POLICY,
         TERMINATE_SANDBOX_START_TO_CLOSE_TIMEOUT,
         FileInput,
@@ -154,6 +157,7 @@ class FileAnalysisWorkflow:
             start_to_close_timeout=timedelta(minutes=1),
             retry_policy=MARK_DB_RETRY_POLICY,
             priority=priority,
+            task_queue=TASK_QUEUE_ACTIVITIES,
         )
 
         sandbox_id: str | None = None
@@ -168,6 +172,7 @@ class FileAnalysisWorkflow:
                 start_to_close_timeout=PROVISION_SANDBOX_START_TO_CLOSE_TIMEOUT,
                 retry_policy=PROVISION_SANDBOX_RETRY_POLICY,
                 priority=priority,
+                task_queue=TASK_QUEUE_ACTIVITIES,
             )
             sandbox_id = provision_result.sandbox_id
 
@@ -199,6 +204,7 @@ class FileAnalysisWorkflow:
                     schedule_to_start_timeout=CALL_CLAUDE_SCHEDULE_TO_START_TIMEOUT,
                     retry_policy=CALL_CLAUDE_RETRY_POLICY,
                     priority=priority,
+                    task_queue=TASK_QUEUE_LLM,
                 )
                 usage = accumulate_usage(usage, resp.usage)
                 messages.append({"role": "assistant", "content": resp.content})
@@ -235,6 +241,7 @@ class FileAnalysisWorkflow:
                             start_to_close_timeout=EXEC_TOOL_START_TO_CLOSE_TIMEOUT,
                             retry_policy=EXEC_TOOL_RETRY_POLICY,
                             priority=priority,
+                            task_queue=TASK_QUEUE_ACTIVITIES,
                         )
                         results.append(
                             build_tool_result_block(block["id"], out.content, is_error=out.is_error)
@@ -277,6 +284,7 @@ class FileAnalysisWorkflow:
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=MARK_DB_RETRY_POLICY,
                 priority=priority,
+                task_queue=TASK_QUEUE_ACTIVITIES,
             )
             return FileResult(status=FileStatus.SUCCEEDED.value)
 
@@ -295,6 +303,7 @@ class FileAnalysisWorkflow:
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=MARK_DB_RETRY_POLICY,
                 priority=priority,
+                task_queue=TASK_QUEUE_ACTIVITIES,
             )
             raise ApplicationError(str(e), type="ValidationError", non_retryable=True) from e
 
@@ -323,6 +332,7 @@ class FileAnalysisWorkflow:
                     start_to_close_timeout=timedelta(minutes=1),
                     retry_policy=MARK_DB_RETRY_POLICY,
                     priority=priority,
+                    task_queue=TASK_QUEUE_ACTIVITIES,
                 )
                 raise ApplicationError(str(e), type=category.name, non_retryable=True) from e
 
@@ -340,6 +350,7 @@ class FileAnalysisWorkflow:
                     start_to_close_timeout=timedelta(minutes=1),
                     retry_policy=MARK_DB_RETRY_POLICY,
                     priority=priority,
+                    task_queue=TASK_QUEUE_ACTIVITIES,
                 )
             raise
 
@@ -353,4 +364,5 @@ class FileAnalysisWorkflow:
                     start_to_close_timeout=TERMINATE_SANDBOX_START_TO_CLOSE_TIMEOUT,
                     retry_policy=TERMINATE_SANDBOX_RETRY_POLICY,
                     priority=priority,
+                    task_queue=TASK_QUEUE_TERMINATE,
                 )
