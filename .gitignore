@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# sbda: generated fixture spreadsheets (produced by `make fixtures`)
+/fixtures/*.csv
+/fixtures/*.xlsx
+/fixtures/*.xls
+/fixtures/*.xlsm
+
+# sbda: local env / uv venvs
+.env
+backend/.venv/
+backend/.python-version
+frontend/node_modules/
