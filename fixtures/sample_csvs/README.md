@@ -15,8 +15,8 @@ with no edge cases.
 - `website_visits.csv` — page analytics
 - `employee_survey.csv` — employee satisfaction survey
 
-Two larger files (100k rows each, several MB) for testing performance and
-batch handling on bigger inputs:
+Two larger files (1,000 rows each) for testing performance and batch
+handling on bigger inputs:
 
 - `large_transactions.csv` — financial transactions
 - `large_sensor_readings.csv` — IoT sensor readings
