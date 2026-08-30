@@ -44,9 +44,12 @@ pair; `llm` also needs `ANTHROPIC_API_KEY`).
 ### Running the test suites
 
 ```bash
-make test          # everything (backend + frontend)
-make test-unit      # tests/unit only — no Docker, no credentials, no network
-make test-web       # vitest (frontend)
+make test              # everything (backend + frontend)
+make test-unit          # tests/unit only — no Docker, no credentials, no network
+make test-api            # tests/api — needs `make up` (real Postgres) first; S3 is mocked (moto)
+make test-activities      # tests/activities — Modal/Temporal activities, mocked
+make test-workflows        # tests/workflows — Temporal workflow replay tests
+make test-web                # vitest (frontend)
 ```
 
 `cd frontend && npm test` runs the same frontend suite directly, and
@@ -88,11 +91,11 @@ test can assert it.
    carries a 10% surcharge on every Action in the namespace while enabled —
    remember to turn it back on afterward.)
 
-## What's not built here
+## What's here
 
-This branch (`feat/frontend`) implements only `frontend/`, `fixtures/generate.py`,
-and this README, against the API contract in `SPEC.md` §5. `backend/` (FastAPI,
-Postgres models, Temporal workflows/activities, the Modal sandbox layer, and the
-agentic loop) is owned by other branches and is expected to land separately —
-the frontend has no runtime dependency on it being present to build, lint, or
-pass its own test suite (`msw` mocks every `fetch` call).
+Both halves of the stack are implemented: `backend/` (FastAPI, Postgres
+models, Temporal workflows/activities, the Modal sandbox layer, and the
+agentic loop) and `frontend/` (the React SPA), against the API contract in
+`SPEC.md` §5. The frontend's own test suite has no runtime dependency on the
+backend being up to build, lint, or pass (`msw` mocks every `fetch` call);
+see `CLAUDE.md` for what's implemented where.
