@@ -38,7 +38,6 @@ uv sync --extra dev        # install deps into backend/.venv
 make up                    # docker compose up -d (postgres, minio, temporal, ...)
 make migrate                # alembic upgrade head
 make seed                   # insert the two seed tenants (Company A / Company B)
-make fixtures                # generate sample spreadsheets into fixtures/
 make api                    # uvicorn sbda.api.main:app --reload, :8000
 
 make test-unit               # tests/unit — pure sbda.core logic, no services needed

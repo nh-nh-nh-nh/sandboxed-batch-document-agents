@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -9,7 +8,6 @@ from hypothesis import strategies as st
 from sbda.core.naming import build_s3_key, sanitize_filename
 
 VALID_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
-FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
 
 def test_spaces_replaced():
@@ -91,19 +89,3 @@ def test_s3_key_never_contains_dotdot_or_double_slash():
     key = build_s3_key("t", "s", "f", "../../etc/passwd")
     assert ".." not in key
     assert "//" not in key
-
-
-# --- fixtures corpus (SPEC.md §14.6) ---------------------------------------
-
-
-def test_generated_fixture_filenames_sanitize_cleanly():
-    if not FIXTURES_DIR.is_dir():
-        return  # `make fixtures` not run in this environment; nothing to check
-    for path in FIXTURES_DIR.iterdir():
-        if path.name == "generate.py":
-            continue
-        result = sanitize_filename(path.name)
-        assert VALID_NAME_RE.match(result)
-        # a real filename with no traversal or shell metacharacters should
-        # round-trip unchanged
-        assert result == path.name

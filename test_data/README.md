@@ -21,6 +21,5 @@ handling on bigger inputs:
 - `large_transactions.csv` — financial transactions
 - `large_sensor_readings.csv` — IoT sensor readings
 
-For the edge-case corpus (messy data, injection attempts, encoding issues,
-etc.) used by the analysis pipeline's tests, see `fixtures/generate.py`
-instead.
+These are plain, committed files for ad-hoc/manual testing — there is no
+generator script and nothing here is gitignored.

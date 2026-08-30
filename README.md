@@ -10,7 +10,6 @@ cp .env.example .env        # fill in ANTHROPIC_API_KEY, MODAL_TOKEN_*, TEMPORAL
 make up                     # docker compose up -d  (postgres, minio — Temporal is Cloud-hosted)
 make migrate                # alembic upgrade head
 make seed                   # insert Company A + Company B tenants
-make fixtures                # generate sample spreadsheets into fixtures/
 
 make api                    # uvicorn, :8000
 make worker                 # temporal worker
@@ -51,15 +50,16 @@ This is the one property that has to be demonstrated live — it lives in the
 Temporal Cloud service's scheduler, not in this codebase, so no automated
 test can assert it.
 
-1. Bring the full stack up (`make up migrate seed fixtures api worker web`)
+1. Bring the full stack up (`make up migrate seed api worker web`)
    and confirm **Settings → Fairness** is turned on for the
    `sandboxed-batch-document-agents.ast5h` namespace in the Temporal Cloud
    console (`cloud.temporal.io`) — the worker logs a startup warning if it
    can't verify this (it can't be checked client-side).
 2. Open the UI at `http://localhost:5173` and the namespace's Workflows view
    at `cloud.temporal.io`.
-3. In the **Company A** panel, stage all 8 fixture files repeatedly (or any
-   ~20 files — duplicates are fine, the loop only cares about volume) and
+3. In the **Company A** panel, stage the sample files from `test_data/`
+   repeatedly (or any ~20 files — duplicates are fine, the loop only cares
+   about volume) and
    submit. You now have a backlog of `FileAnalysisWorkflow` children queued
    under the `company-a` fairness key.
 4. A few seconds later, before Company A's backlog drains, submit **1 file**
