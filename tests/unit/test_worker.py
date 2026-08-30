@@ -15,6 +15,7 @@ def restore_settings(monkeypatch):
     monkeypatch.setattr(settings, "anthropic_api_key", "key")
     monkeypatch.setattr(settings, "modal_token_id", "id")
     monkeypatch.setattr(settings, "modal_token_secret", "secret")
+    monkeypatch.setattr(settings, "temporal_api_key", "temporal-key")
 
 
 def test_check_required_credentials_passes_when_all_present():
@@ -23,7 +24,7 @@ def test_check_required_credentials_passes_when_all_present():
 
 @pytest.mark.parametrize(
     "field_name",
-    ["anthropic_api_key", "modal_token_id", "modal_token_secret"],
+    ["anthropic_api_key", "modal_token_id", "modal_token_secret", "temporal_api_key"],
 )
 def test_check_required_credentials_fails_fast_when_missing(monkeypatch, field_name):
     monkeypatch.setattr(settings, field_name, "")

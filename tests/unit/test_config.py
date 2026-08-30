@@ -33,15 +33,16 @@ def test_defaults_match_env_example():
     assert s.aws_access_key_id == "minioadmin"
     assert s.aws_secret_access_key == "minioadmin"
     assert s.aws_region == "us-east-1"
-    assert s.temporal_address == "localhost:7233"
-    assert s.temporal_namespace == "default"
+    assert s.temporal_address == "sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233"
+    assert s.temporal_namespace == "sandboxed-batch-document-agents.ast5h"
+    assert s.temporal_tls is True
     assert s.temporal_task_queue == "document-analysis"
     assert s.worker_max_concurrent_activities == 16
     assert s.worker_max_concurrent_workflow_tasks == 100
     assert s.anthropic_model == "claude-sonnet-5"
     assert s.anthropic_max_tokens == 8192
     assert s.anthropic_effort == "medium"
-    assert s.modal_app_name == "sbda-sandboxes"
+    assert s.modal_app_name == "sandboxed-batch-document-agents"
     assert s.sandbox_timeout_s == 1200
     assert s.sandbox_cpu == 0.25
     assert s.sandbox_memory_mb == 1024

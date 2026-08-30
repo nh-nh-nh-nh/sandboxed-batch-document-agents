@@ -33,9 +33,11 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = "minioadmin"
     aws_region: str = "us-east-1"
 
-    # --- Temporal ---
-    temporal_address: str = "localhost:7233"
-    temporal_namespace: str = "default"
+    # --- Temporal Cloud ---
+    temporal_address: str = "sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233"
+    temporal_namespace: str = "sandboxed-batch-document-agents.ast5h"
+    temporal_api_key: str = ""
+    temporal_tls: bool = True
     temporal_task_queue: str = "document-analysis"
     worker_max_concurrent_activities: int = 16
     worker_max_concurrent_workflow_tasks: int = 100
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
     # --- Modal ---
     modal_token_id: str = ""
     modal_token_secret: str = ""
-    modal_app_name: str = "sbda-sandboxes"
+    modal_app_name: str = "sandboxed-batch-document-agents"
     sandbox_timeout_s: int = 1200
     sandbox_cpu: float = 0.25
     sandbox_memory_mb: int = 1024
@@ -75,6 +77,10 @@ class Settings(BaseSettings):
             raise RuntimeError("MODAL_TOKEN_ID is required but not set")
         if not self.modal_token_secret:
             raise RuntimeError("MODAL_TOKEN_SECRET is required but not set")
+
+    def require_temporal_credentials(self) -> None:
+        if not self.temporal_api_key:
+            raise RuntimeError("TEMPORAL_API_KEY is required but not set")
 
 
 def get_settings() -> Settings:

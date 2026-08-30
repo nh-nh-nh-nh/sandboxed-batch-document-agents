@@ -52,7 +52,7 @@ parse them.
 sandboxed-batch-document-agents/
 ├─ SPEC.md
 ├─ README.md                     # quickstart, credentials, walkthrough
-├─ docker-compose.yml            # temporal + postgres + minio + createbuckets
+├─ docker-compose.yml            # postgres + minio + createbuckets (Temporal is Cloud-hosted)
 ├─ .env.example
 ├─ Makefile                      # up, migrate, seed, api, worker, web, test
 ├─ backend/
@@ -342,18 +342,14 @@ B's file is dispatched against A's backlog at roughly equal share rather than
 queueing behind all 100. When B is idle, A gets 100% of worker capacity — no
 artificial per-tenant cap.
 
-**Self-hosted requirement (verified):** fairness must be enabled in Temporal
-dynamic config. The dev server is started with:
-
-```
-temporal server start-dev --ip 0.0.0.0 \
-  --dynamic-config-value matching.enableFairness=true
-```
-
-`infra/dynamicconfig/development.yaml` carries the same value for the
-docker-compose path. If fairness is not enabled the system still works
-correctly — dispatch simply becomes FIFO — so this is a soft dependency, and
-the worker logs a startup warning naming the flag.
+**Temporal Cloud requirement (verified):** fairness dispatch is a per-namespace
+toggle under **Settings → Fairness** in the Temporal Cloud console (not a CLI
+flag or dynamic-config file — those only apply to a self-hosted server), and
+carries a 10% surcharge on every Action in the namespace once enabled. It has
+been turned on for `sandboxed-batch-document-agents.ast5h`. If fairness is
+disabled the system still works correctly — dispatch simply becomes FIFO — so
+this is a soft dependency, and the worker logs a startup warning naming the
+flag.
 
 ### 6.2 Concurrency
 
@@ -532,7 +528,7 @@ Three properties worth stating plainly:
 built once and cached by Modal:
 
 ```python
-app = modal.App.lookup("sbda-sandboxes", create_if_missing=True)
+app = modal.App.lookup("sandboxed-batch-document-agents", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -990,9 +986,11 @@ AWS_ACCESS_KEY_ID=minioadmin
 AWS_SECRET_ACCESS_KEY=minioadmin
 AWS_REGION=us-east-1
 
-# --- Temporal ---
-TEMPORAL_ADDRESS=localhost:7233
-TEMPORAL_NAMESPACE=default
+# --- Temporal Cloud ---
+TEMPORAL_ADDRESS=sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233
+TEMPORAL_NAMESPACE=sandboxed-batch-document-agents.ast5h
+TEMPORAL_API_KEY=
+TEMPORAL_TLS=true
 TEMPORAL_TASK_QUEUE=document-analysis
 WORKER_MAX_CONCURRENT_ACTIVITIES=16
 WORKER_MAX_CONCURRENT_WORKFLOW_TASKS=100
@@ -1006,7 +1004,7 @@ ANTHROPIC_EFFORT=medium
 # --- Modal (real credentials required) ---
 MODAL_TOKEN_ID=
 MODAL_TOKEN_SECRET=
-MODAL_APP_NAME=sbda-sandboxes
+MODAL_APP_NAME=sandboxed-batch-document-agents
 SANDBOX_TIMEOUT_S=1200
 SANDBOX_CPU=0.25
 SANDBOX_MEMORY_MB=1024
@@ -1027,23 +1025,45 @@ AGENT_MAX_TURNS=25           # 0 = unlimited (see §9.5)
 | `postgres` | `postgres:16` | 5432 |
 | `minio` | `minio/minio` | 9000, 9001 (console) |
 | `createbuckets` | `minio/mc` | one-shot bucket creation |
-| `temporal` | `temporalio/auto-setup` (own postgres db) | 7233 |
-| `temporal-ui` | `temporalio/ui` | 8080 |
 
-Temporal is configured with `DYNAMIC_CONFIG_FILE_PATH` pointing at
-`infra/dynamicconfig/development.yaml` containing `matching.enableFairness: true`.
+Temporal is **not** containerized. Both local development and production
+connect to the same Temporal Cloud namespace
+(`sandboxed-batch-document-agents.ast5h`, region `us-west-2`), authenticated
+with an API key scoped to that namespace's service account — this keeps the
+workflow/fairness/retry behavior identical between dev and prod instead of
+diverging from a self-hosted dev server. `sbda/temporal/client.py` builds the
+client with `tls=True` and `api_key=settings.temporal_api_key`; there is no
+mTLS cert path to manage.
 
-Modal and Anthropic are **not** containerized — they need real accounts.
-The worker fails fast at startup with a clear message if either credential is
-missing.
+For local CLI access (`temporal workflow list`, `temporal operator ...`),
+configure a named environment once:
+
+```bash
+temporal env set --env sandboxed-batch-document-agents --key address \
+  --value sandboxed-batch-document-agents.ast5h.tmprl.cloud:7233
+temporal env set --env sandboxed-batch-document-agents --key namespace \
+  --value sandboxed-batch-document-agents.ast5h
+temporal env set --env sandboxed-batch-document-agents --key api-key \
+  --value <API_KEY_FROM_CLOUD_CONSOLE>
+temporal env set --env sandboxed-batch-document-agents --key tls --value true
+```
+
+then pass `--env sandboxed-batch-document-agents` to any `temporal` command
+(or `export TEMPORAL_ENV=sandboxed-batch-document-agents`). API keys are
+generated from the namespace's **Authentication** panel in the Temporal Cloud
+console and shown only once.
+
+Modal, Anthropic, and Temporal Cloud are **not** containerized — they need
+real accounts. The worker fails fast at startup with a clear message if any
+credential is missing.
 
 ---
 
 ## 13. Running It
 
 ```bash
-cp .env.example .env        # fill in ANTHROPIC_API_KEY and MODAL_TOKEN_*
-make up                     # docker compose up -d
+cp .env.example .env        # fill in ANTHROPIC_API_KEY, MODAL_TOKEN_*, TEMPORAL_API_KEY
+make up                     # docker compose up -d (postgres + minio only)
 make migrate                # alembic upgrade head
 make seed                   # insert Company A + Company B
 make fixtures               # generate sample spreadsheets into fixtures/
@@ -1425,11 +1445,12 @@ Untested by design, and why:
 ### 14.8 Manual verification
 
 `README.md` documents the end-to-end walkthrough: submit 20 files to Company A,
-then 1 file to Company B a few seconds later, and observe in both the UI and the
-Temporal UI that B's file starts before A's backlog drains. Re-run with
-`matching.enableFairness` off to see the FIFO contrast — this is the only
-honest way to demonstrate the property, since it lives in the Temporal server,
-not in this codebase.
+then 1 file to Company B a few seconds later, and observe in both the UI and
+the namespace's Workflows view in the Temporal Cloud console
+(`cloud.temporal.io`) that B's file starts before A's backlog drains. Re-run
+with the namespace's **Settings → Fairness** toggle off to see the FIFO
+contrast — this is the only honest way to demonstrate the property, since it
+lives in the Temporal service, not in this codebase.
 
 ---
 
