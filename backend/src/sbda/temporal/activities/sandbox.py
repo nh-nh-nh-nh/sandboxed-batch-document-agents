@@ -18,6 +18,8 @@ from sbda.agent.runtime import (
     render_read_file_source,
     render_run_python_source,
     render_tool_output,
+    version_dir,
+    version_path,
 )
 from sbda.config import settings
 from sbda.core.errors import SandboxGoneError, ValidationError
@@ -46,6 +48,8 @@ class ExecToolInput:
     tool_name: str
     tool_input: dict
     turn_index: int = 0
+    file_id: str = ""
+    sanitized_filename: str = ""
 
 
 @dataclass
@@ -131,6 +135,20 @@ async def exec_tool(input: ExecToolInput) -> ExecToolResult:
 
     path = cell_path(input.turn_index)
     try:
+        if input.tool_name == "run_python":
+            # Snapshot the current input file into a file_id-scoped, versioned
+            # folder before the code actually runs. Best-effort: a missing or
+            # already-renamed source (e.g. the agent's own code moved it in a
+            # prior turn) is not fatal, so the `cp`'s exit code is ignored.
+            # See `version_dir`/`version_path` in `agent/runtime.py` for why.
+            sb.exec("mkdir", "-p", version_dir(input.file_id)).wait()
+            sb.exec(
+                "cp",
+                "-p",
+                _sandbox_input_path(input.sanitized_filename),
+                version_path(input.file_id, input.turn_index, input.sanitized_filename),
+            ).wait()
+
         await sb.filesystem.write_text.aio(source, path)
 
         proc = sb.exec(

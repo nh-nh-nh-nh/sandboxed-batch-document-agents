@@ -405,6 +405,17 @@ wastes the LLM tokens already spent on that file, and that is the accepted
 price for a simple, obviously-correct recovery story with no artifact-replay
 logic and no snapshotting on the hot path.
 
+**Versioned snapshots exist, but only as a future seam, not as recovery.**
+Before each `run_python` call actually executes, `exec_tool` copies the
+current input file into `/work/.versions/{file_id}/v{turn_index:04d}_...`
+(see §9.4). This is plain local sandbox disk today, lost along with the rest
+of `/work` when the sandbox goes away — it does not change the "sandbox loss
+is not recovered in place" behavior above. The directory is deliberately
+`file_id`-scoped so that, if it were ever backed by a mounted Modal Volume
+instead, a later attempt could in principle seed its fresh sandbox from the
+last surviving version and resume rather than starting over — that resume
+path is not implemented.
+
 ---
 
 ## 7. Workflows
@@ -769,6 +780,11 @@ calls and that intermediate results should be written to `/work/`.
 
 Execution: the code is written to `/work/.agent/cell_{n}.py` via `sb.open()`
 (avoiding shell-quoting hazards entirely), then `sb.exec("python", path)`.
+Before that write-and-exec, the current input file is copied (best-effort,
+`cp`, non-fatal on failure) into `/work/.versions/{file_id}/v{n:04d}_...`
+purely as a demo of what a future Modal Volume-backed version history would
+look like — see §6.4. The original input file's path is never touched by
+this copy, and the code still runs against it unchanged.
 Returns a rendered block:
 
 ```
