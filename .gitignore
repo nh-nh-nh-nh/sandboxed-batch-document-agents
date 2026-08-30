@@ -228,14 +228,6 @@ frontend/node_modules/
 # --- Env ---
 .env
 
-# --- Fixtures (generated) ---
-fixtures/*.csv
-fixtures/*.tsv
-fixtures/*.xlsx
-fixtures/*.xls
-fixtures/*.xlsm
-!fixtures/generate.py
-
 # --- Python / uv ---
 backend/.venv/
 backend/.python-version

@@ -103,8 +103,7 @@ sandboxed-batch-document-agents/
 │     ├─ components/{TenantPanel,DropZone,StagedFileList,BatchTable,
 │     │              StatusPill,SubmissionHistory,ReportDrawer}.tsx
 │     └─ App.tsx                 # split screen
-├─ fixtures/                     # generated sample spreadsheets
-│  └─ generate.py
+├─ test_data/                     # small, committed sample CSVs for ad-hoc/manual testing
 └─ tests/
    ├─ conftest.py                # shared factories: FileInput, LLM response builders
    ├─ unit/                      # pure functions — no I/O, no clients, <1s total
@@ -1066,7 +1065,6 @@ cp .env.example .env        # fill in ANTHROPIC_API_KEY, MODAL_TOKEN_*, TEMPORAL
 make up                     # docker compose up -d (postgres + minio only)
 make migrate                # alembic upgrade head
 make seed                   # insert Company A + Company B
-make fixtures               # generate sample spreadsheets into fixtures/
 make api                    # uvicorn, :8000
 make worker                 # temporal worker
 make web                    # vite dev server, :5173
@@ -1079,19 +1077,10 @@ make test-web               # vitest
 `make test-unit` runs with no Docker, no credentials, and no network — it is the
 loop to run while writing code. The other layers need the compose stack up.
 
-`make fixtures` generates, via `openpyxl`/`csv`:
-
-- `clean_sales.csv` — 5k rows, tidy
-- `multi_sheet_financials.xlsx` — 3 sheets, formulas, merged header cells
-- `messy_inventory.xlsx` — mixed types per column, blank rows, junk header band
-- `mostly_empty.csv` — 2 rows
-- `wrong_extension.xlsx` — actually a plain text file (exercises the in-sandbox
-  sniffing path and the `VALIDATION` category)
-- `injection.csv` — a cell containing an instruction addressed to an AI
-  (exercises §10's injection defense; the expected outcome is a *finding*, not
-  compliance)
-- `wide.csv` — 400 columns
-- `unicode_mixed.csv` — non-UTF-8 encoding
+`test_data/` holds small, committed sample CSVs (a handful of simple ones plus
+two larger, 1,000-row files) for ad-hoc/manual testing — staging files in the
+UI, exercising the upload flow. They are plain fixtures with no generator
+script and are unrelated to the automated test suite below.
 
 ---
 
@@ -1421,11 +1410,11 @@ Temporal client mocked.
 
 ### 14.6 Fixtures as test data
 
-The generated corpus in `fixtures/` doubles as unit-test input: `test_naming.py`
-and `test_validation.py` run over the real filenames, and
-`wrong_extension.xlsx` / `injection.csv` are asserted to route to the
-`VALIDATION` path and the delimiter-spoofing test respectively — without ever
-being parsed outside a sandbox.
+`test_naming.py` and `test_validation.py` exercise `sbda/core` with inline,
+hand-written cases (traversal attempts, oversized batches, disallowed
+extensions, a spoofed delimiter, etc.) rather than a generated corpus on disk.
+`test_data/` (see §13) is separate, ad-hoc sample data for manual UI testing —
+it is not read by any automated test.
 
 ### 14.7 Coverage and what is deliberately untested
 

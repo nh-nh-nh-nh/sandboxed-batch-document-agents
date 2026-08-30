@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from sbda.core.enums import ErrorCategory
@@ -113,9 +111,7 @@ def test_validate_extension_standalone():
         validate_extension("bad.pdf")
 
 
-# --- fixtures corpus (SPEC.md §14.6) ---------------------------------------
-
-FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
+# --- edge cases named after the wrong_extension / injection scenarios (SPEC.md §14.6) ---
 
 
 def test_wrong_extension_fixture_passes_extension_check_but_is_a_validation_case():
@@ -130,14 +126,3 @@ def test_wrong_extension_fixture_passes_extension_check_but_is_a_validation_case
 
 def test_injection_fixture_has_an_allowed_extension():
     validate_extension("injection.csv")
-
-
-def test_generated_fixtures_pass_batch_validation():
-    if not FIXTURES_DIR.is_dir():
-        return  # `make fixtures` not run in this environment
-    metas = [
-        FileMeta(filename=p.name, size_bytes=p.stat().st_size)
-        for p in FIXTURES_DIR.iterdir()
-        if p.suffix.lower() in {".csv", ".tsv", ".xlsx", ".xls", ".xlsm"}
-    ]
-    validate_batch(metas)
