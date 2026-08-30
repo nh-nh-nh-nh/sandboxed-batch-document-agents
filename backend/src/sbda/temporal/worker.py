@@ -43,7 +43,12 @@ from sbda.temporal.activities.db import (
     mark_submission_terminal,
 )
 from sbda.temporal.activities.llm import call_claude
-from sbda.temporal.activities.sandbox import exec_tool, provision_sandbox, terminate_sandbox
+from sbda.temporal.activities.sandbox import (
+    exec_tool,
+    provision_sandbox,
+    recover_sandbox,
+    terminate_sandbox,
+)
 from sbda.temporal.shared import (
     TASK_QUEUE_ACTIVITIES,
     TASK_QUEUE_LLM,
@@ -129,6 +134,7 @@ def build_activities_worker(client: Client) -> Worker:
             mark_file_failed,
             provision_sandbox,
             exec_tool,
+            recover_sandbox,
         ],
         max_concurrent_activities=settings.worker_max_concurrent_activities,
     )

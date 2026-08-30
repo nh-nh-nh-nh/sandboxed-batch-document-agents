@@ -10,6 +10,7 @@ import pytest
 from temporalio.client import WorkflowFailureError
 from temporalio.worker import Replayer
 
+from sbda.config import settings
 from sbda.core.errors import SandboxGoneError, ValidationError, LLMClientError
 from sbda.temporal.shared import TASK_QUEUE_WORKFLOW, FileInput, FileRef, SubmissionInput
 from sbda.temporal.workflows.file_analysis import FileAnalysisWorkflow
@@ -291,6 +292,100 @@ async def test_sandbox_terminated_on_failure(temporal_env):
     # 3 workflow attempts, each provisions + terminates its own sandbox.
     assert len(recorder.terminate_calls) == 3
     assert recorder.files[file_id].status == "FAILED"
+
+
+async def test_recovers_from_sandbox_loss_mid_loop_without_full_retry(temporal_env):
+    env = temporal_env
+    recorder = Recorder()
+    file_id = new_id()
+    scripts = {
+        file_id: Script(
+            call_claude_turns=[
+                ([tool_use_block("run_python", {"code": "print(1)"})], "tool_use"),
+                ([report_block(block_id="tool_2")], "tool_use"),
+            ],
+            exec_tool_fail_sandbox_generations={1},  # the original sandbox dies
+        )
+    }
+
+    submission_id = new_id()
+    async with run_all_workers(env.client, recorder, scripts):
+        result = await env.client.execute_workflow(
+            SubmissionWorkflow.run,
+            SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
+            id=f"submission-{submission_id}",
+            task_queue=TASK_QUEUE_WORKFLOW,
+        )
+
+    # Exactly one workflow attempt — recovery happened *inside* it, not via a
+    # full child-workflow retry (which would show mark_file_running_calls ==
+    # [1, 2, 3] and an empty message history on each new attempt).
+    assert recorder.mark_file_running_calls == [1]
+    assert len(recorder.recover_calls) == 1
+    assert recorder.files[file_id].status == "SUCCEEDED"
+    assert len(recorder.terminate_calls) == 2  # the lost sandbox and its replacement
+    assert result.status == "SUCCEEDED"
+
+
+async def test_gives_up_after_max_recoveries_and_fails_whole_child(temporal_env):
+    env = temporal_env
+    recorder = Recorder()
+    file_id = new_id()
+    scripts = {
+        file_id: Script(
+            call_claude_turns=[([tool_use_block("run_python", {"code": "print(1)"})], "tool_use")],
+            # Fails every call, every attempt — exhausts the recovery budget
+            # each time, so this must fall back to the existing whole-child
+            # retry (matching test_child_retries_on_sandbox_gone's shape).
+            exec_tool_fail_sandbox_generations={1, 2, 3},
+        )
+    }
+
+    submission_id = new_id()
+    async with run_all_workers(env.client, recorder, scripts):
+        result = await env.client.execute_workflow(
+            SubmissionWorkflow.run,
+            SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
+            id=f"submission-{submission_id}",
+            task_queue=TASK_QUEUE_WORKFLOW,
+        )
+
+    assert recorder.mark_file_running_calls == [1, 2, 3]
+    assert recorder.files[file_id].status == "FAILED"
+    assert recorder.files[file_id].error_category == "SANDBOX"
+    # Recovery genuinely engaged (and was exhausted) before giving up on each
+    # attempt — distinguishes this from a provision-time failure, which never
+    # touches recover_sandbox at all.
+    assert len(recorder.recover_calls) >= settings.sandbox_max_recoveries
+    assert result.status == "FAILED"
+
+
+async def test_finally_terminates_every_sandbox_created_for_a_recovered_file(temporal_env):
+    env = temporal_env
+    recorder = Recorder()
+    file_id = new_id()
+    scripts = {
+        file_id: Script(
+            call_claude_turns=[
+                ([tool_use_block("run_python", {"code": "print(1)"})], "tool_use"),
+                ([report_block(block_id="tool_2")], "tool_use"),
+            ],
+            exec_tool_fail_sandbox_generations={1},
+        )
+    }
+
+    submission_id = new_id()
+    async with run_all_workers(env.client, recorder, scripts):
+        await env.client.execute_workflow(
+            SubmissionWorkflow.run,
+            SubmissionInput(submission_id=submission_id, tenant_id="tenant-a", files=[file_ref(file_id)]),
+            id=f"submission-{submission_id}",
+            task_queue=TASK_QUEUE_WORKFLOW,
+        )
+
+    # The set, not just the count: proves every sandbox created for this file
+    # (the original and its replacement) got cleaned up, not just the latest.
+    assert set(recorder.terminate_calls) == {f"sb-{file_id}", f"sb-{file_id}#2"}
 
 
 async def test_no_sandbox_terminate_when_provision_failed(temporal_env):

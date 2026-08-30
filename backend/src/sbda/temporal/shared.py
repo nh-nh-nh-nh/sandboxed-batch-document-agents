@@ -73,6 +73,11 @@ PROVISION_SANDBOX_START_TO_CLOSE_TIMEOUT = timedelta(minutes=5)
 EXEC_TOOL_START_TO_CLOSE_TIMEOUT = timedelta(minutes=3)
 TERMINATE_SANDBOX_START_TO_CLOSE_TIMEOUT = timedelta(minutes=1)
 
+# `recover_sandbox` does no S3 I/O (the snapshot already contains /work/input/…),
+# just Sandbox.create + mount_image, both cheap — a much shorter timeout than
+# provisioning's, which is sized for streaming a file in from S3.
+RECOVER_SANDBOX_START_TO_CLOSE_TIMEOUT = timedelta(minutes=2)
+
 MODAL_SANDBOX_TIMEOUT_S = 1200  # 20 minutes wall clock
 MODAL_EXEC_TIMEOUT_S = 120
 
@@ -101,6 +106,7 @@ CALL_CLAUDE_RETRY_POLICY = RetryPolicy(
 )
 
 PROVISION_SANDBOX_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+RECOVER_SANDBOX_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
 
 # Transport-level retries only — a non-zero exit from the tool code itself is a
 # normal (non-exceptional) activity result, not a failure Temporal retries.

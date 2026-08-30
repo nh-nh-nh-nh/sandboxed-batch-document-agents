@@ -47,27 +47,40 @@ class FakeOpenFile:
         self.sandbox.written[self.path] += data
 
 
-class FakeAioWriter:
-    """Fakes `sb.filesystem.write_bytes` / `.write_text` — each exposes an
-    `.aio(data, path)` coroutine, matching the real Modal sandbox filesystem
-    API used by `provision_sandbox`/`exec_tool`.
+class _FakeAsyncMethod:
+    """Mirrors the real Modal SDK shape: a sync-callable object that also
+    exposes `.aio(...)` — activity code always calls the `.aio()` form.
     """
 
-    def __init__(self, sandbox):
-        self.sandbox = sandbox
+    def __init__(self, fn):
+        self._fn = fn
 
-    async def aio(self, data, path):
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        else:
-            data = bytes(data)
-        self.sandbox.written[path] = self.sandbox.written.get(path, b"") + data
+    async def aio(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
 
 
-class FakeFilesystem:
-    def __init__(self, sandbox):
-        self.write_bytes = FakeAioWriter(sandbox)
-        self.write_text = FakeAioWriter(sandbox)
+class FakeImage:
+    """A fake directory-snapshot `Image`: just the subset of a sandbox's
+    `.written` dict that fell under the snapshotted path, replayable into
+    another `FakeSandbox` via `mount_image`.
+    """
+
+    _registry: dict[str, FakeImage] = {}
+    _counter = 0
+
+    def __init__(self, object_id: str, contents: dict[str, bytes]):
+        self.object_id = object_id
+        self.contents = dict(contents)
+
+    @classmethod
+    def from_id(cls, image_id):
+        img = cls._registry.get(image_id)
+        if img is None:
+            raise fake_modal.exception.NotFoundError(image_id)
+        return img
 
 
 class FakeSandbox:
@@ -80,11 +93,36 @@ class FakeSandbox:
         self.exec_queue: list[tuple[str, str, int]] = []
         self.terminate_calls = 0
         self.terminated = False
-        self.filesystem = FakeFilesystem(self)
+        self.mount_calls: list[tuple[str, str]] = []
+        self.filesystem = types.SimpleNamespace(
+            write_bytes=_FakeAsyncMethod(self._write_bytes),
+            write_text=_FakeAsyncMethod(self._write_text),
+        )
+        self.snapshot_directory = _FakeAsyncMethod(self._snapshot_directory)
+        self.mount_image = _FakeAsyncMethod(self._mount_image)
         FakeSandbox._registry[object_id] = self
 
     def open(self, path, mode="wb"):
         return FakeOpenFile(self, path, mode)
+
+    def _write_bytes(self, data, path):
+        self.written[path] = bytes(data)
+
+    def _write_text(self, text, path):
+        self.written[path] = text.encode("utf-8")
+
+    def _snapshot_directory(self, path, ttl=None, timeout=55):
+        FakeImage._counter += 1
+        object_id = f"snap-{FakeImage._counter}"
+        prefix = path.rstrip("/") + "/"
+        contents = {p: v for p, v in self.written.items() if p == path or p.startswith(prefix)}
+        img = FakeImage(object_id, contents)
+        FakeImage._registry[object_id] = img
+        return img
+
+    def _mount_image(self, path, image):
+        self.mount_calls.append((path, image.object_id))
+        self.written.update(image.contents)
 
     def exec(self, *args, **kwargs):
         self.exec_calls.append(args)
@@ -118,6 +156,7 @@ class FakeSandbox:
 
 fake_modal = types.SimpleNamespace(
     Sandbox=FakeSandbox,
+    Image=FakeImage,
     exception=types.SimpleNamespace(NotFoundError=FakeNotFoundError),
 )
 
@@ -150,6 +189,8 @@ class FakeS3Client:
 @pytest.fixture(autouse=True)
 def patched_modal(monkeypatch):
     FakeSandbox._registry.clear()
+    FakeImage._registry.clear()
+    FakeImage._counter = 0
     monkeypatch.setattr(sandbox_mod, "modal", fake_modal)
     monkeypatch.setattr(sandbox_mod, "get_app", lambda: "fake-app")
     monkeypatch.setattr(sandbox_mod, "get_image", lambda: "fake-image")
@@ -204,8 +245,6 @@ async def test_provision_sandbox_zero_byte_file_raises_validation_error(monkeypa
 
 async def test_exec_tool_resolves_sandbox_with_from_id_every_call():
     sb = FakeSandbox.create()
-    sb.exec_queue.append(("", "", 0))  # mkdir -p (version snapshot)
-    sb.exec_queue.append(("", "", 0))  # cp (version snapshot)
     sb.exec_queue.append(("ok\n", "", 0))
 
     result = await sandbox_mod.exec_tool(
@@ -253,67 +292,6 @@ async def test_run_python_writes_code_to_file_never_shell_interpolated():
         assert all("rm -rf" not in str(a) for a in call)
 
 
-async def test_run_python_snapshots_versioned_copy_before_exec():
-    sb = FakeSandbox.create()
-    sb.exec_queue.append(("mkdir-ok\n", "", 0))  # mkdir -p
-    sb.exec_queue.append(("cp-ok\n", "", 0))  # cp
-    sb.exec_queue.append(("ran\n", "", 0))  # python <cell>
-
-    await sandbox_mod.exec_tool(
-        sandbox_mod.ExecToolInput(
-            sandbox_id=sb.object_id,
-            tool_name="run_python",
-            tool_input={"code": "print('ran')"},
-            turn_index=3,
-            file_id="f1",
-            sanitized_filename="in.csv",
-        )
-    )
-
-    mkdir_call, cp_call, python_call = sb.exec_calls
-    assert mkdir_call == ("mkdir", "-p", "/work/.versions/f1")
-    assert cp_call == ("cp", "-p", "/work/input/in.csv", "/work/.versions/f1/v0003_in.csv")
-    assert python_call[0] == "python"
-
-
-async def test_run_python_snapshot_ignores_cp_failure():
-    sb = FakeSandbox.create()
-    sb.exec_queue.append(("", "", 0))  # mkdir -p
-    sb.exec_queue.append(("", "no such file\n", 1))  # cp fails: source already moved
-    sb.exec_queue.append(("ran\n", "", 0))  # python <cell> still runs
-
-    result = await sandbox_mod.exec_tool(
-        sandbox_mod.ExecToolInput(
-            sandbox_id=sb.object_id,
-            tool_name="run_python",
-            tool_input={"code": "print('ran')"},
-            turn_index=0,
-            file_id="f1",
-            sanitized_filename="in.csv",
-        )
-    )
-    assert "ran" in result.content
-    assert result.is_error is False
-
-
-async def test_read_file_does_not_create_version_snapshot():
-    sb = FakeSandbox.create()
-    sb.exec_queue.append(("data\n", "", 0))
-
-    await sandbox_mod.exec_tool(
-        sandbox_mod.ExecToolInput(
-            sandbox_id=sb.object_id,
-            tool_name="read_file",
-            tool_input={"path": "input/in.csv"},
-            turn_index=0,
-            file_id="f1",
-            sanitized_filename="in.csv",
-        )
-    )
-
-    assert not any(call[0] in ("mkdir", "cp") for call in sb.exec_calls)
-
-
 async def test_terminate_sandbox_on_already_gone_succeeds():
     await sandbox_mod.terminate_sandbox(sandbox_mod.TerminateInput(sandbox_id="never-existed"))
 
@@ -324,3 +302,95 @@ async def test_terminate_sandbox_is_idempotent_called_twice():
     assert sb.terminate_calls == 1
     # second call: sandbox now reports terminated -> from_id raises NotFoundError -> swallowed
     await sandbox_mod.terminate_sandbox(sandbox_mod.TerminateInput(sandbox_id=sb.object_id))
+
+
+async def test_provision_sandbox_returns_snapshot_id(monkeypatch):
+    s3 = FakeS3Client(b"data")
+    monkeypatch.setattr(sandbox_mod, "get_s3_client", lambda: s3)
+
+    result = await sandbox_mod.provision_sandbox(
+        sandbox_mod.ProvisionInput(s3_key="k", sanitized_filename="f.csv", file_id="f1")
+    )
+
+    assert result.snapshot_id.startswith("snap-")
+    snapshot = FakeImage.from_id(result.snapshot_id)
+    assert "/work/input/f.csv" in snapshot.contents
+
+
+async def test_exec_tool_run_python_returns_snapshot_id_on_success():
+    sb = FakeSandbox.create()
+    sb.exec_queue.append(("ok\n", "", 0))
+
+    result = await sandbox_mod.exec_tool(
+        sandbox_mod.ExecToolInput(
+            sandbox_id=sb.object_id, tool_name="run_python", tool_input={"code": "print(1)"}
+        )
+    )
+
+    assert result.snapshot_id is not None
+    assert FakeImage.from_id(result.snapshot_id) is not None
+
+
+async def test_exec_tool_read_file_does_not_snapshot():
+    sb = FakeSandbox.create()
+    sb.written["/work/input/f.csv"] = b"a,b\n1,2\n"
+
+    result = await sandbox_mod.exec_tool(
+        sandbox_mod.ExecToolInput(
+            sandbox_id=sb.object_id,
+            tool_name="read_file",
+            tool_input={"path": "/work/input/f.csv"},
+        )
+    )
+
+    assert result.snapshot_id is None
+
+
+async def test_exec_tool_snapshot_failure_does_not_fail_tool_call(monkeypatch):
+    sb = FakeSandbox.create()
+    sb.exec_queue.append(("ok\n", "", 0))
+
+    def _boom(path, ttl=None, timeout=55):
+        raise RuntimeError("snapshot RPC failed")
+
+    monkeypatch.setattr(sb, "snapshot_directory", _FakeAsyncMethod(_boom))
+
+    result = await sandbox_mod.exec_tool(
+        sandbox_mod.ExecToolInput(
+            sandbox_id=sb.object_id, tool_name="run_python", tool_input={"code": "print(1)"}
+        )
+    )
+
+    assert "ok" in result.content
+    assert result.is_error is False
+    assert result.snapshot_id is None
+
+
+async def test_recover_sandbox_mounts_snapshot_and_returns_new_sandbox_id():
+    original = FakeSandbox.create()
+    original.written["/work/input/f.csv"] = b"a,b\n1,2\n"
+    snapshot = original._snapshot_directory("/work")
+
+    result = await sandbox_mod.recover_sandbox(
+        sandbox_mod.RecoverSandboxInput(
+            snapshot_id=snapshot.object_id, sanitized_filename="f.csv", file_id="f1"
+        )
+    )
+
+    recovered = FakeSandbox._registry[result.sandbox_id]
+    assert recovered.written["/work/input/f.csv"] == b"a,b\n1,2\n"
+    assert recovered.mount_calls == [("/work", snapshot.object_id)]
+
+
+async def test_recover_sandbox_raises_sandbox_gone_error_if_input_missing_after_mount():
+    original = FakeSandbox.create()
+    # nothing written under /work -> the snapshot is empty, so the mounted
+    # sandbox will be missing the input file.
+    snapshot = original._snapshot_directory("/work")
+
+    with pytest.raises(SandboxGoneError):
+        await sandbox_mod.recover_sandbox(
+            sandbox_mod.RecoverSandboxInput(
+                snapshot_id=snapshot.object_id, sanitized_filename="f.csv", file_id="f1"
+            )
+        )

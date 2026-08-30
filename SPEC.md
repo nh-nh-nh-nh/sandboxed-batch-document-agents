@@ -413,27 +413,26 @@ worker dies permanently, no sandbox outlives 20 minutes.
 | `call_claude` | `maximum_attempts=5`, `initial_interval=2s`, `backoff=2.0`, `maximum_interval=60s`; `non_retryable_error_types=["LLMClientError"]` |
 | `provision_sandbox` | `maximum_attempts=3` |
 | `exec_tool` | `maximum_attempts=2` (transport-level only; tool *failure* is a normal result, not an exception) |
+| `recover_sandbox` | `maximum_attempts=3` |
 | `terminate_sandbox` | `maximum_attempts=5`, long backoff — must not leak |
 | `mark_*` DB activities | unlimited attempts, `maximum_interval=30s` — the read model must converge |
 
-**Sandbox loss is not recovered in place.** If a sandbox disappears mid-loop
-(Modal preemption, its own timeout, OOM), the `exec_tool` activity raises
-`SandboxGoneError`, which fails the child workflow. Temporal retries the entire
-child from scratch: new sandbox, fresh S3 download, empty message history. This
-wastes the LLM tokens already spent on that file, and that is the accepted
-price for a simple, obviously-correct recovery story with no artifact-replay
-logic and no snapshotting on the hot path.
-
-**Versioned snapshots exist, but only as a future seam, not as recovery.**
-Before each `run_python` call actually executes, `exec_tool` copies the
-current input file into `/work/.versions/{file_id}/v{turn_index:04d}_...`
-(see §9.4). This is plain local sandbox disk today, lost along with the rest
-of `/work` when the sandbox goes away — it does not change the "sandbox loss
-is not recovered in place" behavior above. The directory is deliberately
-`file_id`-scoped so that, if it were ever backed by a mounted Modal Volume
-instead, a later attempt could in principle seed its fresh sandbox from the
-last surviving version and resume rather than starting over — that resume
-path is not implemented.
+**Sandbox loss is recovered in place, up to a bounded budget.** If a sandbox
+disappears mid-loop (Modal preemption, its own timeout, OOM), the `exec_tool`
+activity raises `SandboxGoneError`. The workflow catches this around the
+single tool-call site, and — provided the last-known directory snapshot of
+`/work` is confirmed current (§8.2a's `snapshot_lag` invariant) and the
+per-file recovery budget (`SANDBOX_MAX_RECOVERIES`, default 2) isn't
+exhausted — calls `recover_sandbox` to mount that snapshot into a fresh
+sandbox and retries the *one tool call* that failed, with `messages` and every
+prior turn's LLM spend intact. Only when the restore point isn't known-current
+or the budget is exhausted does the exception propagate to the outer handler,
+which falls back to the original behavior: Temporal retries the entire child
+from scratch (new sandbox, fresh `provision_sandbox`, empty message history).
+This full-retry fallback still exists — for provisioning-time failures (no
+snapshot exists yet) and for a sandbox that dies deterministically on every
+recovery attempt — so a simple, obviously-correct worst case is preserved even
+though the common case now recovers cheaply.
 
 ---
 
@@ -487,8 +486,13 @@ without writing its own terminal row.
 
 ```
  1. execute_activity(mark_file_running, file_id, attempt=workflow.info().attempt)
- 2. sandbox_id = execute_activity(provision_sandbox, ProvisionInput(
+ 2. provision = execute_activity(provision_sandbox, ProvisionInput(
         s3_key, sanitized_filename, file_id))        # §8.2
+    sandbox_id = provision.sandbox_id
+    sandbox_ids = [sandbox_id]                        # every sandbox this file ever used
+    latest_snapshot_id = provision.snapshot_id        # §8.2a — mandatory, the recovery baseline
+    snapshot_lag = 0                                  # run_python successes since last confirmed snapshot
+    recoveries_used = 0
  3. try:
  4.     messages = [ initial user message, §9.2.1 ]
  5.     for turn in count():
@@ -506,8 +510,22 @@ without writing its own terminal row.
 17.                 results.append(ok tool_result)
 18.                 done = True
 19.             else:
-20.                 out = execute_activity(exec_tool, ExecToolInput(
-21.                          sandbox_id, block.name, block.input))
+20.                 while True:                                            # §8.2a
+21.                     try:
+22.                         out = execute_activity(exec_tool, ExecToolInput(
+                                 sandbox_id, block.name, block.input))
+                            break
+                        except SandboxGoneError:
+                            if snapshot_lag != 0 or recoveries_used >= SANDBOX_MAX_RECOVERIES:
+                                raise
+                            recoveries_used += 1
+                            recovered = execute_activity(recover_sandbox, RecoverSandboxInput(
+                                latest_snapshot_id, sanitized_filename, file_id))
+                            sandbox_id = recovered.sandbox_id
+                            sandbox_ids.append(sandbox_id)
+                    if block.name == "run_python":
+                        if out.snapshot_id: latest_snapshot_id, snapshot_lag = out.snapshot_id, 0
+                        else: snapshot_lag += 1
 22.                 results.append(tool_result(out.content, is_error=out.is_error))
 23.         messages.append(user message with ALL tool_results)
 24.         if done: break
@@ -521,16 +539,21 @@ without writing its own terminal row.
 32.         execute_activity(mark_file_failed, file_id, classify(e), str(e))
 33.     raise
 34. finally:
-35.     if sandbox_id:
-36.         execute_activity(terminate_sandbox, sandbox_id)   # always runs
+35.     for sb_id in sandbox_ids:                          # every sandbox, not just the last
+36.         try: execute_activity(terminate_sandbox, sb_id)
+        except Exception: pass                            # one failure must not skip the rest
 ```
 
 Three properties worth stating plainly:
 
-- **The `finally` block is the sandbox's owner.** It runs on success, on
-  failure, on cancellation, and on every retry attempt. Combined with Modal's
-  own 20-minute wall-clock timeout, a leaked sandbox requires both Temporal and
-  Modal to fail simultaneously.
+- **The `finally` block is the sandbox's owner — of every sandbox this file
+  ever used, not just the last.** It runs on success, on failure, on
+  cancellation, and on every retry attempt, terminating each entry in
+  `sandbox_ids` independently so one failing `terminate_sandbox` call can't
+  skip the rest (a recovered-but-not-actually-dead sandbox — a false positive
+  from a transient control-plane blip — still needs cleanup). Combined with
+  Modal's own 20-minute wall-clock timeout, a leaked sandbox requires both
+  Temporal and Modal to fail simultaneously.
 - **`mark_file_failed` is only written on the final attempt.** Intermediate
   attempts leave the row `RUNNING`, so the UI doesn't flicker to "failed" and
   back while Temporal retries.
@@ -610,6 +633,63 @@ The worker handles the bytes but never interprets them — no parsing, no
 
 `heartbeat()` is emitted during the transfer so a slow upload doesn't trip
 start-to-close.
+
+### 8.2a Snapshot-based recovery
+
+`provision_sandbox` also takes a mandatory baseline snapshot immediately after
+confirming the input landed:
+
+```python
+snapshot = await sb.snapshot_directory.aio("/work", ttl=SANDBOX_SNAPSHOT_TTL_S)
+```
+
+`ProvisionResult.snapshot_id` (the returned `Image.object_id`) is the earliest
+point a mid-loop sandbox loss can restore from — this call is *not*
+best-effort: a failure here propagates into `provision_sandbox`'s own retry
+policy, since recovery has nothing to restore from otherwise.
+
+After every successful `run_python` call (the only tool that mutates `/work`;
+`read_file` is read-only and isn't snapshotted), `exec_tool` takes another
+snapshot the same way and returns its id as `ExecToolResult.snapshot_id`. This
+one *is* best-effort — a snapshot RPC failure must not fail an otherwise-
+successful tool call — but the workflow tracks the resulting drift: a
+`snapshot_lag` counter increments whenever a `run_python` call succeeds but
+its snapshot doesn't, and resets to `0` whenever one does. Recovery is only
+attempted while `snapshot_lag == 0`, so a restore point is always known-current
+rather than merely assumed so; otherwise the mid-loop `SandboxGoneError`
+propagates and the whole-child-workflow retry (§6.4) takes over instead.
+
+If `exec_tool` raises `SandboxGoneError`, and `snapshot_lag == 0`, and the
+per-file recovery budget (`SANDBOX_MAX_RECOVERIES`, default 2) isn't
+exhausted, the workflow calls a new activity:
+
+```python
+sb = modal.Sandbox.create(app=app, image=image, timeout=SANDBOX_TIMEOUT_S,
+    block_network=True, cpu=SANDBOX_CPU, memory=SANDBOX_MEMORY_MB, workdir="/work")
+await sb.mount_image.aio("/work", modal.Image.from_id(input.snapshot_id))
+```
+
+then re-checks `test -s /work/input/<sanitized_filename>` exactly as
+`provision_sandbox` does. No S3 client is involved — the snapshot already
+contains `/work/input/<sanitized_filename>`, so recovery never re-touches S3
+or the worker's bandwidth. A failed sanity check raises `SandboxGoneError`
+(never `ValidationError`: a bad mount is a system fault, not a bad input, and
+must stay retryable rather than permanently failing the file on one flaky
+mount). On success the workflow swaps in the new `sandbox_id` and retries the
+*single tool call* that failed — `messages` and every prior turn's LLM spend
+are untouched.
+
+This retry is genuinely idempotent, not merely assumed so: `run_python` runs a
+fresh process per call with no interpreter/session state (§9.4), and
+`block_network=True` means the sandbox filesystem is the only side-effect
+channel — a snapshot is only ever taken *after* a call completes, so restoring
+it and replaying the one call that failed reproduces exactly the pre-failure
+state, nothing more.
+
+Every sandbox a file ever used (the original plus each recovery) is tracked
+and terminated in the workflow's `finally` block (§7.2) — a "gone" sandbox may
+not actually be dead (a false positive from a transient control-plane blip),
+so it still needs cleanup, not just the sandbox currently in use.
 
 ### 8.3 Sticky routing — resolved
 
@@ -799,11 +879,6 @@ calls and that intermediate results should be written to `/work/`.
 
 Execution: the code is written to `/work/.agent/cell_{n}.py` via `sb.open()`
 (avoiding shell-quoting hazards entirely), then `sb.exec("python", path)`.
-Before that write-and-exec, the current input file is copied (best-effort,
-`cp`, non-fatal on failure) into `/work/.versions/{file_id}/v{n:04d}_...`
-purely as a demo of what a future Modal Volume-backed version history would
-look like — see §6.4. The original input file's path is never touched by
-this copy, and the code still runs against it unchanged.
 Returns a rendered block:
 
 ```
@@ -889,6 +964,7 @@ The core assumption: **spreadsheet bytes and spreadsheet contents are hostile.**
 | Path traversal via filename | Filenames are sanitized before use in S3 keys and sandbox paths; the original is stored only as a DB string. `read_file` also resolves and asserts containment under `/work`, but that check is hygiene, not a control — `run_python` can read any path in the sandbox. Nothing outside the sandbox is reachable, which is the property that actually matters. |
 | Oversized upload | Per-file 1 MiB, per-submission 100 MiB, 100 files, enforced during streaming. |
 | Cross-tenant data access | Every query is tenant-scoped; mismatched tenant returns 404. Explicitly tested. |
+| Directory-snapshot retention (§8.2a) | Snapshots persist attacker-influenced `/work` content (anything the model wrote via `run_python`) in Modal's own Image store for up to `SANDBOX_SNAPSHOT_TTL_S` after the sandbox that wrote it is gone — extended retention, not a new exfiltration path: the store is still inside the same Modal account/trust boundary as the sandbox itself, and `block_network=True` still means nothing inside `/work` can be exfiltrated at write time. |
 
 **Out of scope for the prototype, stated honestly:** no auth, no per-tenant
 S3 credentials, no encryption at rest beyond the store's default, no PII
@@ -1047,6 +1123,8 @@ SANDBOX_TIMEOUT_S=1200
 SANDBOX_CPU=0.25
 SANDBOX_MEMORY_MB=1024
 TOOL_EXEC_TIMEOUT_S=120
+SANDBOX_MAX_RECOVERIES=2      # §8.2a — per-file mid-loop recovery budget
+SANDBOX_SNAPSHOT_TTL_S=3600   # §8.2a — Modal Image retention for /work snapshots
 
 # --- Limits ---
 MAX_FILES_PER_SUBMISSION=100
@@ -1540,10 +1618,20 @@ that when one bites, the cause is already documented.
    timeout retry after a completed call re-bills. Bounded by
    `max_concurrent_activities` and the 5-attempt cap, but real.
 
-4. **Full-file retry wastes tokens.** Sandbox loss on turn 12 of 15 discards all
-   prior LLM spend for that file and starts over. Chosen over artifact
-   snapshotting (latency on every turn) and tool-call replay (assumes
-   idempotence). With 3 attempts, worst case is 3× the token cost of one file.
+4. **Snapshot recovery trades latency and Modal quota for durability.**
+   (Superseded: this used to read "full-file retry wastes tokens" — mid-loop
+   sandbox loss now recovers in place via directory snapshots, §8.2a.) Every
+   `run_python` call pays an extra Modal round-trip to snapshot `/work`, and a
+   sandbox loss costs up to `SANDBOX_MAX_RECOVERIES` (default 2) extra
+   `Sandbox.create` + `mount_image` round-trips per file. Across a 100-file,
+   25-turn batch this can create on the order of thousands of short-lived
+   `Image` objects; `SANDBOX_SNAPSHOT_TTL_S` (default 1h) bounds how long they
+   linger, but Modal-side quota/rate-limit exposure during a large batch is
+   new surface area this design didn't have before. The original failure mode
+   (full-child retry re-running everything from scratch) is still the fallback
+   whenever the restore point isn't known-current or the recovery budget is
+   exhausted, so the worst case remains bounded at 3× the token cost of one
+   file, same as before.
 
 5. **Upload cap and sandbox memory are coupled, silently.** At
    `MAX_FILE_BYTES=1 MiB` against `SANDBOX_MEMORY_MB=1024`, in-sandbox OOM is

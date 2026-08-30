@@ -18,8 +18,6 @@ from sbda.agent.runtime import (
     render_read_file_source,
     render_run_python_source,
     render_tool_output,
-    version_dir,
-    version_path,
 )
 from sbda.config import settings
 from sbda.core.errors import SandboxGoneError, ValidationError
@@ -40,6 +38,7 @@ class ProvisionInput:
 @dataclass
 class ProvisionResult:
     sandbox_id: str
+    snapshot_id: str
 
 
 @dataclass
@@ -48,18 +47,29 @@ class ExecToolInput:
     tool_name: str
     tool_input: dict
     turn_index: int = 0
-    file_id: str = ""
-    sanitized_filename: str = ""
 
 
 @dataclass
 class ExecToolResult:
     content: str
     is_error: bool
+    snapshot_id: str | None = None
 
 
 @dataclass
 class TerminateInput:
+    sandbox_id: str
+
+
+@dataclass
+class RecoverSandboxInput:
+    snapshot_id: str
+    sanitized_filename: str
+    file_id: str
+
+
+@dataclass
+class RecoverSandboxResult:
     sandbox_id: str
 
 
@@ -106,7 +116,13 @@ async def provision_sandbox(input: ProvisionInput) -> ProvisionResult:
             f"file {input.sanitized_filename!r} landed empty in the sandbox"
         )
 
-    return ProvisionResult(sandbox_id=sb.object_id)
+    # Baseline recovery point: this must succeed (no try/except) since it is
+    # the earliest snapshot a mid-loop `SandboxGoneError` could ever restore
+    # from — a failure here should retry via PROVISION_SANDBOX_RETRY_POLICY,
+    # not silently leave recovery with nothing to restore.
+    snapshot = await sb.snapshot_directory.aio("/work", ttl=settings.sandbox_snapshot_ttl_s)
+
+    return ProvisionResult(sandbox_id=sb.object_id, snapshot_id=snapshot.object_id)
 
 
 def _resolve_sandbox(sandbox_id: str):
@@ -135,20 +151,6 @@ async def exec_tool(input: ExecToolInput) -> ExecToolResult:
 
     path = cell_path(input.turn_index)
     try:
-        if input.tool_name == "run_python":
-            # Snapshot the current input file into a file_id-scoped, versioned
-            # folder before the code actually runs. Best-effort: a missing or
-            # already-renamed source (e.g. the agent's own code moved it in a
-            # prior turn) is not fatal, so the `cp`'s exit code is ignored.
-            # See `version_dir`/`version_path` in `agent/runtime.py` for why.
-            sb.exec("mkdir", "-p", version_dir(input.file_id)).wait()
-            sb.exec(
-                "cp",
-                "-p",
-                _sandbox_input_path(input.sanitized_filename),
-                version_path(input.file_id, input.turn_index, input.sanitized_filename),
-            ).wait()
-
         await sb.filesystem.write_text.aio(source, path)
 
         proc = sb.exec(
@@ -173,7 +175,63 @@ async def exec_tool(input: ExecToolInput) -> ExecToolResult:
     rendered = render_tool_output(
         stdout, stderr, exit_code, settings.tool_output_max_bytes
     )
-    return ExecToolResult(content=rendered.content, is_error=rendered.is_error)
+
+    snapshot_id = None
+    if input.tool_name == "run_python":
+        # Only run_python can mutate /work — read_file is read-only, so
+        # snapshotting after it would be pure waste. Best-effort: a snapshot
+        # RPC failure must not fail an otherwise-successful tool call. The
+        # workflow tracks drift (snapshot_lag) when this comes back None, so
+        # "best-effort" here can't silently make a later recovery restore
+        # from a stale snapshot.
+        try:
+            snapshot = await sb.snapshot_directory.aio(
+                "/work", ttl=settings.sandbox_snapshot_ttl_s
+            )
+            snapshot_id = snapshot.object_id
+        except Exception:
+            pass
+
+    return ExecToolResult(
+        content=rendered.content, is_error=rendered.is_error, snapshot_id=snapshot_id
+    )
+
+
+@activity.defn
+async def recover_sandbox(input: RecoverSandboxInput) -> RecoverSandboxResult:
+    """Replace a lost sandbox with a fresh one restored from the last-known
+    snapshot of `/work` — no S3 involved, since the snapshot already contains
+    `/work/input/<sanitized_filename>` (SPEC.md §8.2a).
+    """
+    app = get_app()
+    image = get_image()
+
+    sb = modal.Sandbox.create(
+        app=app,
+        image=image,
+        timeout=settings.sandbox_timeout_s,
+        block_network=True,
+        cpu=settings.sandbox_cpu,
+        memory=settings.sandbox_memory_mb,
+        workdir="/work",
+    )
+
+    snapshot_image = modal.Image.from_id(input.snapshot_id)
+    await sb.mount_image.aio("/work", snapshot_image)
+
+    dest_path = _sandbox_input_path(input.sanitized_filename)
+    check = sb.exec("test", "-s", dest_path)
+    check.wait()
+    if check.returncode != 0:
+        # A bad mount is a system fault, not a bad input — must stay
+        # retryable (SandboxGoneError), never ValidationError, or a single
+        # flaky mount would permanently fail the file with no fallback to
+        # the whole-child-workflow retry safety net.
+        raise SandboxGoneError(
+            f"recovered sandbox missing input {input.sanitized_filename!r} after mount"
+        )
+
+    return RecoverSandboxResult(sandbox_id=sb.object_id)
 
 
 def _looks_like_sandbox_gone(exc: Exception) -> bool:

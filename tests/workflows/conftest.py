@@ -19,6 +19,7 @@ from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from sbda.core.errors import SandboxGoneError
 from sbda.temporal.activities.db import (
     MarkFileFailedInput,
     MarkFileRunningInput,
@@ -32,6 +33,8 @@ from sbda.temporal.activities.sandbox import (
     ExecToolResult,
     ProvisionInput,
     ProvisionResult,
+    RecoverSandboxInput,
+    RecoverSandboxResult,
     TerminateInput,
 )
 from sbda.temporal.shared import (
@@ -54,6 +57,7 @@ _ACTIVITIES_QUEUE_NAMES = (
     "mark_file_failed",
     "provision_sandbox",
     "exec_tool",
+    "recover_sandbox",
 )
 
 
@@ -81,6 +85,7 @@ class Recorder:
     exec_calls: list[tuple] = field(default_factory=list)
     call_claude_calls: list[list[dict]] = field(default_factory=list)
     mark_file_running_calls: list[int] = field(default_factory=list)
+    recover_calls: list[tuple[str, str]] = field(default_factory=list)  # (file_id, snapshot_id)
 
     def file(self, file_id: str) -> FileRow:
         return self.files.setdefault(file_id, FileRow())
@@ -99,6 +104,11 @@ class Script:
     (1-indexed); attempts after it succeed. None means "every attempt".
     `exec_tool_result`: fixed (content, is_error) returned for every
     sandbox tool call, unless `exec_tool_effect` is given.
+    `exec_tool_fail_sandbox_generations`: sandbox "generations" (1 = the
+    original sandbox for this file, 2 = the first recovery, 3 = the second,
+    ...) on which `exec_tool` deterministically raises `SandboxGoneError`
+    instead of returning a result, for every call against that generation —
+    for exercising mid-loop sandbox-recovery.
     """
 
     def __init__(
@@ -109,12 +119,14 @@ class Script:
         provision_error_attempts=None,
         exec_tool_result=("<stdout>ok</stdout>\n<stderr></stderr>\nexit_code: 0", False),
         exec_tool_effect=None,
+        exec_tool_fail_sandbox_generations=frozenset(),
     ):
         self.call_claude_turns = list(call_claude_turns or [])
         self.provision_error = provision_error
         self.provision_error_attempts = provision_error_attempts
         self.exec_tool_result = exec_tool_result
         self.exec_tool_effect = exec_tool_effect
+        self.exec_tool_fail_sandbox_generations = frozenset(exec_tool_fail_sandbox_generations)
 
 
 def build_fake_activities(recorder: Recorder, scripts: dict[str, Script]):
@@ -169,17 +181,57 @@ def build_fake_activities(recorder: Recorder, scripts: dict[str, Script]):
         )
         if should_raise:
             raise script.provision_error(f"provision failed for {input.file_id}")
-        return ProvisionResult(sandbox_id=f"sb-{input.file_id}")
+        return ProvisionResult(
+            sandbox_id=f"sb-{input.file_id}", snapshot_id=f"snap-{input.file_id}-0"
+        )
+
+    def _sandbox_generation(sandbox_id: str) -> int:
+        # "sb-<file_id>" is generation 1 (the original sandbox); "sb-<file_id>#N"
+        # is generation N (the (N-1)th recovery) — see recover_sandbox below.
+        _, _, suffix = sandbox_id.partition("#")
+        return int(suffix) if suffix else 1
 
     @activity.defn(name="exec_tool")
     async def exec_tool(input: ExecToolInput) -> ExecToolResult:
+        file_key = input.sandbox_id.removeprefix("sb-").split("#", 1)[0]
         recorder.exec_calls.append((input.sandbox_id, input.tool_name))
-        script = script_for(input.sandbox_id.removeprefix("sb-"))
+        script = script_for(file_key)
+
+        # A "gone" sandbox stays gone: fail deterministically for *every* call
+        # against this sandbox generation, not just the Nth call overall.
+        # Keying on a raw call counter instead would let Temporal's own
+        # transport-level retry (EXEC_TOOL_RETRY_POLICY, maximum_attempts=2 —
+        # which reuses the same sandbox_id) silently "recover" for free the
+        # moment the counter ticks past the failing number, without the
+        # workflow's own recovery loop ever running.
+        generation = _sandbox_generation(input.sandbox_id)
+        if generation in script.exec_tool_fail_sandbox_generations:
+            raise SandboxGoneError(
+                f"sandbox {input.sandbox_id} (generation {generation}) is gone"
+            )
+
         if script.exec_tool_effect is not None:
             content, is_error = script.exec_tool_effect(input)
         else:
             content, is_error = script.exec_tool_result
-        return ExecToolResult(content=content, is_error=is_error)
+        return ExecToolResult(
+            content=content, is_error=is_error, snapshot_id=f"snap-{file_key}-{generation}"
+        )
+
+    # Recovery generation, per (file_id, attempt) — keyed per-attempt so every
+    # workflow attempt (including full child-workflow retries) sees the same
+    # generation sequence (2, 3, ...) rather than a number that keeps climbing
+    # across attempts.
+    recovery_counts: dict[tuple[str, int], int] = {}
+
+    @activity.defn(name="recover_sandbox")
+    async def recover_sandbox(input: RecoverSandboxInput) -> RecoverSandboxResult:
+        recorder.recover_calls.append((input.file_id, input.snapshot_id))
+        attempt = recorder.mark_file_running_calls[-1] if recorder.mark_file_running_calls else 1
+        key = (input.file_id, attempt)
+        recovery_counts[key] = recovery_counts.get(key, 0) + 1
+        generation = recovery_counts[key] + 1  # generation 1 is the original sandbox
+        return RecoverSandboxResult(sandbox_id=f"sb-{input.file_id}#{generation}")
 
     @activity.defn(name="terminate_sandbox")
     async def terminate_sandbox(input: TerminateInput) -> None:
@@ -238,6 +290,7 @@ def build_fake_activities(recorder: Recorder, scripts: dict[str, Script]):
         mark_file_failed,
         provision_sandbox,
         exec_tool,
+        recover_sandbox,
         terminate_sandbox,
         call_claude,
     ]

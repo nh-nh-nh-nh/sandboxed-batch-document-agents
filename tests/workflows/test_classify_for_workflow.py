@@ -8,7 +8,7 @@ exhausting its own per-error-type retry budget) always wins over `classify()`.
 from __future__ import annotations
 
 from sbda.core.enums import ErrorCategory
-from sbda.temporal.workflows.file_analysis import _classify_for_workflow
+from sbda.temporal.workflows.file_analysis import _classify_for_workflow, _is_sandbox_gone
 
 
 class _FakeFailure(Exception):
@@ -61,3 +61,32 @@ def test_budget_exhausted_other_retryable_error_is_not_retryable():
     category, retryable = _classify_for_workflow(_wrapped_llm_failure("APIStatusError", True))
     assert category == ErrorCategory.LLM
     assert retryable is False
+
+
+def _chained_sandbox_gone_failure():
+    """Mirrors the real shape produced by `sandbox.py`'s
+    `raise SandboxGoneError(...) from e`: an outer
+    ApplicationError(type="SandboxGoneError") wrapping an inner one for the
+    underlying Modal SDK exception (e.g. NotFoundError). The *innermost* link
+    carries the SDK's name, not ours — a root-cause-only scan would miss this.
+    """
+    inner = _FakeFailure("sandbox not found", type="NotFoundError")
+    return _FakeFailure("sandbox gone during exec", type="SandboxGoneError", cause=inner)
+
+
+def test_is_sandbox_gone_detects_chained_failure():
+    assert _is_sandbox_gone(_chained_sandbox_gone_failure()) is True
+
+
+def test_is_sandbox_gone_false_for_unrelated_chained_failure():
+    assert _is_sandbox_gone(_wrapped_llm_failure("RateLimitError", False)) is False
+
+
+def test_classify_for_workflow_categorizes_chained_sandbox_gone_as_sandbox():
+    # Before the whole-chain scan, this fell through to a root-cause-only
+    # lookup of "NotFoundError", which classify() doesn't recognize as a
+    # SandboxError subclass — silently misclassifying every real sandbox-gone
+    # failure as INTERNAL instead of SANDBOX.
+    category, retryable = _classify_for_workflow(_chained_sandbox_gone_failure())
+    assert category == ErrorCategory.SANDBOX
+    assert retryable is True

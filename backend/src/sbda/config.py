@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     sandbox_cpu: float = 0.25
     sandbox_memory_mb: int = 1024
     tool_exec_timeout_s: int = 120
+    sandbox_max_recoveries: int = 2
+    sandbox_snapshot_ttl_s: int = 3600
 
     # --- Limits ---
     max_files_per_submission: int = 100

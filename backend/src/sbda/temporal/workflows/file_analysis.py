@@ -48,9 +48,11 @@ with workflow.unsafe.imports_passed_through():
     from sbda.temporal.activities.sandbox import (
         ExecToolInput,
         ProvisionInput,
+        RecoverSandboxInput,
         TerminateInput,
         exec_tool,
         provision_sandbox,
+        recover_sandbox,
         terminate_sandbox,
     )
     from sbda.temporal.shared import (
@@ -62,6 +64,8 @@ with workflow.unsafe.imports_passed_through():
         MARK_DB_RETRY_POLICY,
         PROVISION_SANDBOX_RETRY_POLICY,
         PROVISION_SANDBOX_START_TO_CLOSE_TIMEOUT,
+        RECOVER_SANDBOX_RETRY_POLICY,
+        RECOVER_SANDBOX_START_TO_CLOSE_TIMEOUT,
         TASK_QUEUE_ACTIVITIES,
         TASK_QUEUE_LLM,
         TASK_QUEUE_TERMINATE,
@@ -116,6 +120,33 @@ def _any_non_retryable(exc: BaseException) -> bool:
     return False
 
 
+def _first_known_type_name(exc: BaseException) -> str | None:
+    """Scan the *whole* cause chain (outer to inner) for a type name present
+    in `_KNOWN_EXCEPTION_TYPES`. `raise SandboxGoneError(...) from e` always
+    chains to the underlying SDK exception (e.g. `NotFoundError`), so the
+    *outer* link carries our own exception's name while the innermost link
+    carries the SDK's — `_root_cause()` alone would find the SDK's name, not
+    ours, and silently misclassify every real chained sandbox failure.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        type_name = getattr(current, "type", None) or type(current).__name__
+        if type_name in _KNOWN_EXCEPTION_TYPES:
+            return type_name
+        seen.add(id(current))
+        current = getattr(current, "cause", None)
+    return None
+
+
+def _is_sandbox_gone(exc: BaseException) -> bool:
+    """Whether `exc` (a possibly-wrapped activity failure) is a
+    `SandboxGoneError` anywhere in its cause chain — see `_first_known_type_name`
+    for why the whole chain, not just the root, must be scanned.
+    """
+    return _first_known_type_name(exc) == "SandboxGoneError"
+
+
 def _classify_for_workflow(exc: BaseException):
     """`classify()` (core/errors.py) is pure and only knows about real
     exception *instances*. By the time an activity failure reaches workflow
@@ -127,17 +158,17 @@ def _classify_for_workflow(exc: BaseException):
     since that's a statement about this specific occurrence, not the general
     error class.
     """
-    root = _root_cause(exc)
-    type_name = getattr(root, "type", None) or type(root).__name__
-
-    cls = _KNOWN_EXCEPTION_TYPES.get(type_name)
-    if cls is not None:
-        category, retryable = classify(cls(str(root)))
-    elif type_name in ("NotFoundError", "TimeoutError"):
-        synthetic = type(type_name, (Exception,), {})
-        category, retryable = classify(synthetic(str(root)))
+    known_name = _first_known_type_name(exc)
+    if known_name is not None:
+        category, retryable = classify(_KNOWN_EXCEPTION_TYPES[known_name](str(_root_cause(exc))))
     else:
-        category, retryable = classify(root)
+        root = _root_cause(exc)
+        type_name = getattr(root, "type", None) or type(root).__name__
+        if type_name in ("NotFoundError", "TimeoutError"):
+            synthetic = type(type_name, (Exception,), {})
+            category, retryable = classify(synthetic(str(root)))
+        else:
+            category, retryable = classify(root)
 
     if _any_non_retryable(exc):
         retryable = False
@@ -160,7 +191,7 @@ class FileAnalysisWorkflow:
             task_queue=TASK_QUEUE_ACTIVITIES,
         )
 
-        sandbox_id: str | None = None
+        sandbox_ids: list[str] = []
         try:
             provision_result = await workflow.execute_activity(
                 provision_sandbox,
@@ -175,6 +206,17 @@ class FileAnalysisWorkflow:
                 task_queue=TASK_QUEUE_ACTIVITIES,
             )
             sandbox_id = provision_result.sandbox_id
+            sandbox_ids.append(sandbox_id)
+            # Recovery state (§8.2a): `latest_snapshot_id` is the restore point
+            # a mid-loop SandboxGoneError recovers into; `snapshot_lag` counts
+            # run_python successes since the last *confirmed* snapshot (the
+            # per-turn snapshot in exec_tool is best-effort) — recovery is only
+            # attempted while it's 0, so a restore is always known-current, not
+            # merely assumed so.
+            latest_snapshot_id = provision_result.snapshot_id
+            snapshot_lag = 0
+            recoveries_used = 0
+            max_recoveries = settings.sandbox_max_recoveries
 
             messages: list[dict] = [
                 {
@@ -228,21 +270,60 @@ class FileAnalysisWorkflow:
                                 build_tool_result_block(block["id"], f"invalid report: {e}", is_error=True)
                             )
                     else:
-                        out = await workflow.execute_activity(
-                            exec_tool,
-                            ExecToolInput(
-                                sandbox_id=sandbox_id,
-                                tool_name=block["name"],
-                                tool_input=block.get("input", {}),
-                                turn_index=turn,
-                                file_id=input.file_id,
-                                sanitized_filename=input.sanitized_filename,
-                            ),
-                            start_to_close_timeout=EXEC_TOOL_START_TO_CLOSE_TIMEOUT,
-                            retry_policy=EXEC_TOOL_RETRY_POLICY,
-                            priority=priority,
-                            task_queue=TASK_QUEUE_ACTIVITIES,
-                        )
+                        while True:
+                            try:
+                                out = await workflow.execute_activity(
+                                    exec_tool,
+                                    ExecToolInput(
+                                        sandbox_id=sandbox_id,
+                                        tool_name=block["name"],
+                                        tool_input=block.get("input", {}),
+                                        turn_index=turn,
+                                    ),
+                                    start_to_close_timeout=EXEC_TOOL_START_TO_CLOSE_TIMEOUT,
+                                    retry_policy=EXEC_TOOL_RETRY_POLICY,
+                                    priority=priority,
+                                    task_queue=TASK_QUEUE_ACTIVITIES,
+                                )
+                                break
+                            except Exception as e:
+                                if (
+                                    not _is_sandbox_gone(e)
+                                    or snapshot_lag != 0
+                                    or recoveries_used >= max_recoveries
+                                ):
+                                    raise
+                                recoveries_used += 1
+                                workflow.logger.warning(
+                                    "sandbox %s lost mid-loop (recovery %d/%d); "
+                                    "restoring from snapshot %s",
+                                    sandbox_id,
+                                    recoveries_used,
+                                    max_recoveries,
+                                    latest_snapshot_id,
+                                )
+                                recover_result = await workflow.execute_activity(
+                                    recover_sandbox,
+                                    RecoverSandboxInput(
+                                        snapshot_id=latest_snapshot_id,
+                                        sanitized_filename=input.sanitized_filename,
+                                        file_id=input.file_id,
+                                    ),
+                                    start_to_close_timeout=RECOVER_SANDBOX_START_TO_CLOSE_TIMEOUT,
+                                    retry_policy=RECOVER_SANDBOX_RETRY_POLICY,
+                                    priority=priority,
+                                    task_queue=TASK_QUEUE_ACTIVITIES,
+                                )
+                                sandbox_id = recover_result.sandbox_id
+                                sandbox_ids.append(sandbox_id)
+
+                        if block["name"] == "run_python":
+                            if out.snapshot_id:
+                                latest_snapshot_id = out.snapshot_id
+                                snapshot_lag = 0
+                            else:
+                                snapshot_lag += 1
+
                         results.append(
                             build_tool_result_block(block["id"], out.content, is_error=out.is_error)
                         )
@@ -356,13 +437,20 @@ class FileAnalysisWorkflow:
 
         finally:
             # The finally block is the sandbox's owner: runs on success,
-            # failure, cancellation, and every retry attempt.
-            if sandbox_id:
-                await workflow.execute_activity(
-                    terminate_sandbox,
-                    TerminateInput(sandbox_id=sandbox_id),
-                    start_to_close_timeout=TERMINATE_SANDBOX_START_TO_CLOSE_TIMEOUT,
-                    retry_policy=TERMINATE_SANDBOX_RETRY_POLICY,
-                    priority=priority,
-                    task_queue=TASK_QUEUE_TERMINATE,
-                )
+            # failure, cancellation, and every retry attempt. A recovered file
+            # may have created more than one sandbox (the "gone" one may not
+            # actually be dead — a false positive from a transient
+            # control-plane blip — so it must still be cleaned up, not just
+            # the latest one). One failing terminate must not skip the rest.
+            for sb_id in sandbox_ids:
+                try:
+                    await workflow.execute_activity(
+                        terminate_sandbox,
+                        TerminateInput(sandbox_id=sb_id),
+                        start_to_close_timeout=TERMINATE_SANDBOX_START_TO_CLOSE_TIMEOUT,
+                        retry_policy=TERMINATE_SANDBOX_RETRY_POLICY,
+                        priority=priority,
+                        task_queue=TASK_QUEUE_TERMINATE,
+                    )
+                except Exception:
+                    pass
