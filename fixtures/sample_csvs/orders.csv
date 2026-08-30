@@ -1,0 +1,11 @@
+order_id,customer_name,order_date,total_amount,status
+5001,Acme Corp,2024-01-05,1250.00,shipped
+5002,Beta LLC,2024-01-08,340.50,pending
+5003,Gamma Inc,2024-01-10,980.25,shipped
+5004,Delta Co,2024-01-12,75.00,cancelled
+5005,Epsilon Ltd,2024-01-15,2100.00,shipped
+5006,Zeta Group,2024-01-18,450.75,pending
+5007,Eta Partners,2024-01-20,610.00,shipped
+5008,Theta Systems,2024-01-22,1980.40,delivered
+5009,Iota Solutions,2024-01-25,120.00,pending
+5010,Kappa Holdings,2024-01-28,875.60,delivered

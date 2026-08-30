@@ -1,0 +1,11 @@
+sku,warehouse,quantity_on_hand,reorder_level
+SKU-100,East,340,50
+SKU-101,East,12,50
+SKU-102,East,275,100
+SKU-103,West,89,50
+SKU-104,West,410,100
+SKU-105,West,5,50
+SKU-106,Central,150,50
+SKU-107,Central,0,50
+SKU-108,Central,620,200
+SKU-109,East,45,50
