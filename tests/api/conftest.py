@@ -67,18 +67,24 @@ def moto_s3():
 class FakeTemporalClient:
     """Records `start_submission_workflow` calls; never touches a real
     Temporal server. Set `.raise_already_started` to exercise the
-    WorkflowAlreadyStartedError-swallowing path."""
+    WorkflowAlreadyStartedError-swallowing path, or `.raise_error` to
+    exercise the "start failed outright" repair path (see
+    routes_submissions.py::_ensure_workflow_started)."""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.raise_already_started = False
+        self.raise_error: Exception | None = None
 
     async def start_submission_workflow(self, *, submission_id, tenant_id, files):
         self.calls.append(
             {"submission_id": submission_id, "tenant_id": tenant_id, "files": files}
         )
+        if self.raise_error is not None:
+            raise self.raise_error
         if self.raise_already_started:
             raise deps.WorkflowAlreadyStartedError()
+        return f"fake-run-{len(self.calls)}"
 
 
 @pytest_asyncio.fixture
