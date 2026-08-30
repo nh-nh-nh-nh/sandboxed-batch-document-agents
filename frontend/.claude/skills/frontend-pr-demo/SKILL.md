@@ -1,12 +1,12 @@
 ---
-name: run-frontend
-description: Build, run, and drive the SBDA frontend SPA (Vite + React). Use when asked to start the frontend, take a screenshot of the UI, record a before/after demo of a frontend change, or embed those recordings in a PR description.
+name: frontend-pr-demo
+description: Build, run, and drive the SBDA frontend SPA (Vite + React) to record a before/after demo for a pull request that changes the UI. Use when creating or updating a PR whose diff touches frontend/ in a visible way, to record before/after GIFs and embed them in the PR description. Not for general frontend dev tasks like starting the dev server or one-off manual testing.
 ---
 
 The frontend (`frontend/`) is a Vite + React SPA with no working backend yet
 (`backend/` doesn't exist — see root `README.md`). It's driven headlessly with
-a Playwright script, `.claude/skills/run-frontend/driver.mjs`, against a small
-zero-dependency mock API, `.claude/skills/run-frontend/mock-api.mjs`, that
+a Playwright script, `.claude/skills/frontend-pr-demo/driver.mjs`, against a small
+zero-dependency mock API, `.claude/skills/frontend-pr-demo/mock-api.mjs`, that
 stands in for the real one. All paths below are relative to `frontend/`.
 
 ## Prerequisites
@@ -30,7 +30,7 @@ npm run build   # tsc --noEmit && vite build
 Start the mock API and the dev server pointed at it, in the background:
 
 ```bash
-node .claude/skills/run-frontend/mock-api.mjs > /tmp/mock-api.log 2>&1 &
+node .claude/skills/frontend-pr-demo/mock-api.mjs > /tmp/mock-api.log 2>&1 &
 VITE_API_BASE_URL=http://localhost:8000 npm run dev > /tmp/vite.log 2>&1 &
 timeout 30 bash -c 'until curl -sf http://localhost:8000/api/tenants >/dev/null; do sleep 1; done'
 timeout 30 bash -c 'until curl -sf http://localhost:5173 >/dev/null; do sleep 1; done'
@@ -39,8 +39,8 @@ timeout 30 bash -c 'until curl -sf http://localhost:5173 >/dev/null; do sleep 1;
 Then drive it:
 
 ```bash
-node .claude/skills/run-frontend/driver.mjs shot /tmp/shot.png
-node .claude/skills/run-frontend/driver.mjs record /tmp/recording demo
+node .claude/skills/frontend-pr-demo/driver.mjs shot /tmp/shot.png
+node .claude/skills/frontend-pr-demo/driver.mjs record /tmp/recording demo
 ```
 
 | command | what it does |
@@ -57,11 +57,11 @@ same demo flow against the base ref and the current branch, so both go in
 the PR description.
 
 ```bash
-node .claude/skills/run-frontend/mock-api.mjs > /tmp/mock-api.log 2>&1 &
+node .claude/skills/frontend-pr-demo/mock-api.mjs > /tmp/mock-api.log 2>&1 &
 VITE_API_BASE_URL=http://localhost:8000 npm run dev > /tmp/vite.log 2>&1 &
 timeout 30 bash -c 'until curl -sf http://localhost:5173 >/dev/null; do sleep 1; done'
 
-bash .claude/skills/run-frontend/record-before-after.sh main /tmp/pr-recording
+bash .claude/skills/frontend-pr-demo/record-before-after.sh main /tmp/pr-recording
 # -> /tmp/pr-recording/after/after.gif   (current worktree, servers above)
 # -> /tmp/pr-recording/before/before.gif (base ref, isolated git worktree + its own ports)
 ```

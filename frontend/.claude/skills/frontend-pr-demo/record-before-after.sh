@@ -35,8 +35,8 @@ trap cleanup EXIT
 
 # $BASE_REF predates this skill, so the driver/mock-api aren't there yet —
 # copy them in, and reuse node_modules instead of a fresh install.
-mkdir -p "$WORKTREE_DIR/frontend/.claude/skills/run-frontend"
-cp "$SKILL_DIR"/*.mjs "$WORKTREE_DIR/frontend/.claude/skills/run-frontend/"
+mkdir -p "$WORKTREE_DIR/frontend/.claude/skills/frontend-pr-demo"
+cp "$SKILL_DIR"/*.mjs "$WORKTREE_DIR/frontend/.claude/skills/frontend-pr-demo/"
 if [ -d "$REPO_ROOT/frontend/node_modules" ]; then
   cp -R "$REPO_ROOT/frontend/node_modules" "$WORKTREE_DIR/frontend/node_modules"
 else
@@ -46,7 +46,7 @@ fi
 BEFORE_API_PORT="${BEFORE_API_PORT:-8100}"
 BEFORE_VITE_PORT="${BEFORE_VITE_PORT:-5273}"
 
-(cd "$WORKTREE_DIR/frontend" && MOCK_API_PORT="$BEFORE_API_PORT" node .claude/skills/run-frontend/mock-api.mjs) &
+(cd "$WORKTREE_DIR/frontend" && MOCK_API_PORT="$BEFORE_API_PORT" node .claude/skills/frontend-pr-demo/mock-api.mjs) &
 (cd "$WORKTREE_DIR/frontend" && VITE_API_BASE_URL="http://localhost:$BEFORE_API_PORT" \
   node node_modules/vite/bin/vite.js --port "$BEFORE_VITE_PORT") &
 
