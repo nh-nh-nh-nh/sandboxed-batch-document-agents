@@ -230,4 +230,9 @@ frontend/node_modules/
 
 # --- Python / uv ---
 backend/.venv/
-backend/.python-version
+
+# --- macOS ---
+.DS_Store
+
+# --- Claude Code ---
+.claude/
