@@ -12,7 +12,10 @@ from sqlalchemy.engine import make_url
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # `.env` lives at the repo root, but every `make` target `cd`s into
+    # `backend/` before running — check both locations so config loads the
+    # same way whether invoked from the repo root or via `make`.
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
     # --- Postgres ---
     database_url: str = "postgresql+asyncpg://sbda:sbda@localhost:5432/sbda"

@@ -22,7 +22,7 @@ worker:
 	cd backend && uv run python -m sbda.temporal.worker
 
 web:
-	cd frontend && npm run dev
+	cd frontend && VITE_API_BASE_URL=http://localhost:8000 npm run dev
 
 test: test-unit test-api test-activities test-workflows test-web
 

@@ -84,15 +84,16 @@ async def provision_sandbox(input: ProvisionInput) -> ProvisionResult:
 
     dest_path = _sandbox_input_path(input.sanitized_filename)
     total_bytes = 0
-    with sb.open(dest_path, "wb") as f:
-        while True:
-            chunk = body.read(_TRANSFER_CHUNK_BYTES)
-            if not chunk:
-                break
-            f.write(chunk)
-            total_bytes += len(chunk)
-            if activity.in_activity():
-                activity.heartbeat(f"transferred {total_bytes} bytes")
+    buf = bytearray()
+    while True:
+        chunk = body.read(_TRANSFER_CHUNK_BYTES)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        total_bytes += len(chunk)
+        if activity.in_activity():
+            activity.heartbeat(f"transferred {total_bytes} bytes")
+    sb.filesystem.write_bytes(bytes(buf), dest_path)
 
     check = sb.exec("test", "-s", dest_path)
     check.wait()
@@ -130,8 +131,7 @@ async def exec_tool(input: ExecToolInput) -> ExecToolResult:
 
     path = cell_path(input.turn_index)
     try:
-        with sb.open(path, "w") as f:
-            f.write(source)
+        sb.filesystem.write_text(source, path)
 
         proc = sb.exec(
             "python",
