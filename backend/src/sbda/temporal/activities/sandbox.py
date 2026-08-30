@@ -93,7 +93,7 @@ async def provision_sandbox(input: ProvisionInput) -> ProvisionResult:
         total_bytes += len(chunk)
         if activity.in_activity():
             activity.heartbeat(f"transferred {total_bytes} bytes")
-    sb.filesystem.write_bytes(bytes(buf), dest_path)
+    await sb.filesystem.write_bytes.aio(bytes(buf), dest_path)
 
     check = sb.exec("test", "-s", dest_path)
     check.wait()
@@ -131,7 +131,7 @@ async def exec_tool(input: ExecToolInput) -> ExecToolResult:
 
     path = cell_path(input.turn_index)
     try:
-        sb.filesystem.write_text(source, path)
+        await sb.filesystem.write_text.aio(source, path)
 
         proc = sb.exec(
             "python",
